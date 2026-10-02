@@ -1,0 +1,9 @@
+# Tajné údaje (token bota, chat ID, MAC a IP PC) – nikdy necommitovat!
+include/secrets.h
+
+# Výstupy PlatformIO
+.pio/
+
+# VS Code – necháváme jen doporučená rozšíření
+.vscode/*
+!.vscode/extensions.json
