@@ -40,7 +40,10 @@ Kroky:
 3) Telegram. Vysvětli mi, jak přes @BotFather založit bota (/newbot) a přes @userinfobot zjistit chat ID,
    a že mám u nového bota kliknout na Start. Pak se mě zeptej na token a chat ID (může jich být víc).
    Zkontroluj formát (token: číslice:znaky, chat ID: jen číslice, případně s mínusem).
-   Vytvoř include/secrets.h podle include/secrets.example.h s mými údaji. Token mi nevypisuj zpátky celý.
+   Zeptej se mě, jestli chci PC z Telegramu i uspávat a vypínat (potřebuje to malého pomocníka na PC, krok 5e v README).
+   Vytvoř include/secrets.h podle include/secrets.example.h s mými údaji. OTA_PASSWORD (nahrávání firmwaru přes Wi-Fi)
+   vygeneruj sám jako náhodné heslo (aspoň 20 znaků); PC_HELPER_SECRET vygeneruj jako 32 náhodných hex znaků,
+   jen pokud chci uspávání/vypínání, jinak nech "". Hesla ani token mi nevypisuj zpátky celé.
    Ověř, že `git check-ignore include/secrets.h` soubor opravdu ignoruje.
 
 4) Wake-on-LAN ve Windows. Nejdřív jen ZKONTROLUJ a ukaž mi stav:
@@ -75,8 +78,11 @@ Kroky:
    Při prvním spuštění vytvoří Wi-Fi "WoL-Spinac" (heslo wolspinac, pokud jsem v secrets.h nezměnil
    PORTAL_PASSWORD): proveď mě připojením z mobilu, výběrem domácí 2,4GHz Wi-Fi a uložením.
    Pak znovu zkontroluj výstup: musí tam být "Připojeno k ..." a "=== Připraveno, čekám na příkazy ===".
-   Zeptej se mě, jestli mi bot v Telegramu napsal "WoL spínač online" a jestli na /status odpovídá
-   "PC je zapnuté". Pokud ne, pomoz mi to vyřešit podle sériového výstupu.
+   Zeptej se mě, jestli mi bot v Telegramu napsal "WoL spínač online" (s tlačítky pod zprávou) a jestli na
+   tlačítko "📊 Stav" odpovídá "PC je zapnuté". Pokud ne, pomoz mi to vyřešit podle sériového výstupu.
+   Pokud chci uspávání/vypínání: spusť jako správce `powershell -ExecutionPolicy Bypass -File pc-helper\install.ps1`
+   (heslo si přečte ze secrets.h) a pak se mě zeptej, jestli "📊 Stav" ukazuje "Pomocník na PC: běží".
+   Vysvětli mi, že příští firmware jde nahrát přes Wi-Fi: `pio run -e ota -t upload` (README → OTA).
 
 7) Tailscale. Zjisti, jestli je nainstalovaný (`tailscale version`, případně
    "C:\Program Files\Tailscale\tailscale.exe"). Pokud ne, nabídni instalaci přes winget (Tailscale.Tailscale).
@@ -92,7 +98,8 @@ Kroky:
    Zmiň, že Apollo umí streamovat i přihlašovací obrazovku Windows.
 
 9) Finální test. Proveď mě testem: na telefonu vypnout Wi-Fi a jet přes mobilní data, PC vypnout,
-   poslat /wake, počkat na "PC naběhlo", připojit se přes Moonlight/Artemis. Protože PC bude vypnuté,
+   poslat /wake, počkat na "PC naběhlo", připojit se přes Moonlight/Artemis. Pokud je nastavený pomocník,
+   může PC místo ručního vypnutí vypnout tlačítkem "⏻ Vypnout" v Telegramu. Protože PC bude vypnuté,
    řekni mi předem všechno, co mám udělat, a že se pak spolu znovu spojíme po zapnutí.
    Pokud něco nefunguje, použij sekci "Řešení problémů" v README.md.
 

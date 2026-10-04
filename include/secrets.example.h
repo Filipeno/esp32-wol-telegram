@@ -23,3 +23,19 @@ static const char *const ALLOWED_CHAT_IDS[] = { "111111111" };
 // Heslo k Wi-Fi "WoL-Spinac", kterou ESP32 vytvoří pro nastavení domácí Wi-Fi
 // (captive portal). Musí mít aspoň 8 znaků.
 #define PORTAL_PASSWORD "wolspinac"
+
+// ---------------------------------------------------------------------
+//  Nepovinné – když necháš prázdné "", funkce je vypnutá.
+// ---------------------------------------------------------------------
+
+// Heslo pro nahrávání firmwaru přes Wi-Fi (OTA), aby ESP32 nemuselo k PC na kabel.
+// Vymysli si cokoli dlouhého, např. "kocka-Lampa-42-modra".
+#define OTA_PASSWORD ""
+
+// Tajné heslo pro pomocníka na PC (složka pc-helper), díky kterému umí bot
+// PC uspat a vypnout. Stejné heslo si přečte pc-helper\install.ps1.
+// Vygeneruj si ho v PowerShellu:  -join ((1..32) | % { '{0:x}' -f (Get-Random -Max 16) })
+#define PC_HELPER_SECRET ""
+
+// Port, na kterém pomocník na PC poslouchá (stejný jako v install.ps1).
+#define PC_HELPER_PORT 8766

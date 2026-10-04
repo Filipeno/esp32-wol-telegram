@@ -9,14 +9,20 @@ Pak se k PC připojíš přes **Moonlight / Artemis** (streamování přes Apoll
 
 ### Co bot umí
 
-| Příkaz | Co udělá |
+Pod zprávami od bota jsou **tlačítka** – stačí klikat, nic se nemusí psát. Příkazy fungují taky:
+
+| Tlačítko / příkaz | Co udělá |
 |---|---|
-| `/wake` | Probudí PC a do 90 sekund ti napíše, jestli naběhlo. |
-| `/status` | Řekne, jestli je PC zapnuté, jak dlouho spínač běží a jak silnou má Wi-Fi. |
+| ⚡ Probudit · `/wake` | Probudí PC a do 90 sekund ti napíše, jestli naběhlo. |
+| 📊 Stav · `/status` | Řekne, jestli je PC zapnuté, jak dlouho spínač běží a jak silnou má Wi-Fi. |
+| 😴 Uspat · `/sleep` | Uspí PC (po potvrzení). *Potřebuje pomocníka na PC – [krok 5e](#5e-uspání-a-vypnutí-z-telegramu-nepovinné).* |
+| ⏻ Vypnout · `/shutdown` | Vypne PC (po potvrzení). *Taky potřebuje pomocníka na PC.* |
+| 🔔 Oznámení · `/notify` | Zapne/vypne zprávy „🟢 PC se zapnulo“ / „⚫ PC se vypnulo“ (výchozí: zapnuté). |
 | `/help` | Seznam příkazů. |
 
 Po každém zapnutí (třeba po výpadku proudu) ti bot napíše **„✅ WoL spínač online“**.
 Příkazy poslané v době, kdy byl spínač vypnutý, se zahodí – PC se tedy po výpadku proudu samo nezapne.
+Nový firmware jde do spínače nahrát i **přes Wi-Fi**, bez odpojování ([viz níže](#nahrání-nového-firmwaru-přes-wi-fi-ota)).
 
 ---
 
@@ -177,7 +183,10 @@ New-NetFirewallRule -DisplayName "WoL spinac - ping" -Direction Inbound -Protoco
    - `BOT_TOKEN` – token z kroku 2,
    - `ALLOWED_CHAT_IDS` – tvoje chat ID z kroku 2 (v uvozovkách),
    - `PC_MAC` – MAC z kroku 3 (pomlčky klidně nech),
-   - `PC_IP` – IP z kroku 3.
+   - `PC_IP` – IP z kroku 3,
+   - `OTA_PASSWORD` – vymysli si dlouhé heslo (např. `kocka-Lampa-42-modra`). Díky němu půjde později nahrát nový firmware přes Wi-Fi. Prázdné `""` = vypnuto.
+   - `PC_HELPER_SECRET` – jen pokud chceš PC z Telegramu i **uspávat a vypínat** (krok 5e). Vygeneruj si ho v PowerShellu příkazem
+     `-join ((1..32) | % { '{0:x}' -f (Get-Random -Max 16) })` a výsledek vlož do uvozovek. Prázdné `""` = vypnuto.
 3. Ulož (Ctrl + S).
 
 ### 5c) Nahraj firmware
@@ -201,8 +210,32 @@ New-NetFirewallRule -DisplayName "WoL spinac - ping" -Direction Inbound -Protoco
 
 Teď ESP32 odpoj od PC a zapoj ho do nabíječky na místě z kroku 1.
 
-✅ **Jak poznám, že je hotovo:** Telegram bot ti napíše **„✅ WoL spínač online“**. Na `/status` odpoví „🟢 PC je zapnuté“.
+✅ **Jak poznám, že je hotovo:** Telegram bot ti napíše **„✅ WoL spínač online“** a pod zprávou jsou tlačítka. Na 📊 Stav odpoví „🟢 PC je zapnuté“.
 (V sériovém monitoru je vidět `=== Připraveno, čekám na příkazy ===`.)
+
+### 5e) Uspání a vypnutí z Telegramu (nepovinné)
+
+ESP32 umí PC jen **probudit**. Aby ho uměl i uspat a vypnout, potřebuje na PC malého pomocníka,
+který poslouchá v domácí síti a příkaz od spínače provede. Pomocník přijme jen příkaz podepsaný heslem
+`PC_HELPER_SECRET` – nikdo jiný v síti ti PC vypnout nemůže.
+
+1. V `secrets.h` musí být vyplněné `PC_HELPER_SECRET` (krok 5b) a firmware s ním musí být nahraný do ESP32.
+2. Otevři **PowerShell jako správce** (pravým na Start → *Terminál (správce)*), přejdi do složky projektu a spusť:
+
+   ```powershell
+   cd pc-helper
+   powershell -ExecutionPolicy Bypass -File .\install.ps1
+   ```
+
+   Skript si heslo přečte sám z `include\secrets.h`, nastaví spouštění pomocníka při startu PC
+   (naplánovaná úloha **WoL spinac helper**) a povolí ve firewallu port 8766 jen z domácí sítě.
+3. Na konci napíše **„Hotovo – pomocník běží“**.
+
+Odinstalace: `powershell -ExecutionPolicy Bypass -File .\uninstall.ps1` (taky jako správce).
+
+> 💡 Uspání je rychlejší než vypnutí a PC se z něj probouzí spolehlivěji. Pokud ale máš zapnutou hibernaci, Windows místo uspání může PC hibernovat – i z toho ho spínač probudí.
+
+✅ **Jak poznám, že je hotovo:** Na 📊 Stav bot ukáže **„🧩 Pomocník na PC: běží“**. Pod zprávami jsou tlačítka 😴 Uspat a ⏻ Vypnout.
 
 ---
 
@@ -301,6 +334,32 @@ Apollo umí streamovat i **přihlašovací obrazovku Windows**, takže se po pro
 - V admin konzoli zkontroluj, že u PC nesvítí **Expired** – pak se přihlas znovu a zapni **Disable key expiry**.
 - Ve **Službách** Windows musí služba **Tailscale** běžet a mít spuštění *Automaticky*.
 
+### 😴 Uspat / Vypnout nefunguje
+
+- **„Pomocník na PC neodpovídá“** – v *Plánovači úloh* (Win + R → `taskschd.msc`) zkontroluj, že úloha **WoL spinac helper** běží. Pokud ne, spusť znovu `install.ps1` jako správce.
+- **„Nesedí heslo“** – `PC_HELPER_SECRET` v `secrets.h` se liší od toho, co si pomocník uložil. Spusť znovu `install.ps1` a nahraj do ESP32 aktuální firmware. Stejná hláška je i při špatném čase v PC – zkontroluj hodiny ve Windows.
+- **„PC ani po 2 minutách nezhaslo“** – vypnutí nebo uspání zablokoval nějaký program, nebo uspání ve Windows nefunguje (zkus Start → Uspat ručně).
+- Co pomocník dělal, najdeš v `C:\ProgramData\WoLSpinac\helper.log`.
+
+### 📡 Nahrávání přes Wi-Fi (OTA) nejde
+
+- Je v `secrets.h` vyplněné `OTA_PASSWORD` a je **tenhle** firmware ve spínači nahraný kabelem aspoň jednou?
+- Když PlatformIO nenajde `wol-spinac.local`, použij IP spínače (ukáže ji 📊 Stav): `pio run -e ota -t upload --upload-port 192.168.1.60`.
+- Visí to na `Waiting for device...`? Windows firewall blokuje odpověď ESP32 → povol Python, až se Windows zeptá, nebo zkus nahrát kabelem.
+
+---
+
+## Nahrání nového firmwaru přes Wi-Fi (OTA)
+
+Když vyjde nová verze (nebo něco změníš v `secrets.h`), nemusíš spínač nosit k PC:
+
+1. Zkontroluj, že je v `secrets.h` vyplněné `OTA_PASSWORD` (krok 5b) a že je PC ve stejné síti jako spínač.
+2. Ve VS Code dole na liště přepni prostředí z `env:esp32dev` na **`env:ota`** a klikni na **šipku →** (*Upload*).
+   Z příkazové řádky: `pio run -e ota -t upload`.
+3. LED na spínači během nahrávání rychle bliká, pak se spínač restartuje a napíše „✅ WoL spínač online“.
+
+Poprvé (a vždy, když se změní `OTA_PASSWORD`) je potřeba nahrát firmware **kabelem**, jako v kroku 5c.
+
 ---
 
 ## Pro zvídavé
@@ -308,4 +367,7 @@ Apollo umí streamovat i **přihlašovací obrazovku Windows**, takže se po pro
 - Kód je v [`src/main.cpp`](src/main.cpp), komentovaný česky. Verze knihoven jsou zafixované v [`platformio.ini`](platformio.ini).
 - Spojení s Telegramem je šifrované a ESP32 ověřuje certifikát Telegramu (Go Daddy Root G2, platný do 2037).
 - Odolnost: ESP32 se při výpadku Wi-Fi samo znovu připojuje, po 10 minutách bez Wi-Fi se restartuje; po 30 minutách bez spojení s Telegramem taky. Hardwarový watchdog restartuje ESP32, kdyby se program zasekl.
+- Stav PC hlídá spínač pingem každých 30 s; za vypnuté ho považuje až po 3 neúspěšných pingách za sebou, aby jeden ztracený ping nespustil falešné oznámení.
+- Pomocník na PC ([`pc-helper/wol-helper.ps1`](pc-helper/wol-helper.ps1)) přijme jen příkaz podepsaný HMAC-SHA256 s heslem `PC_HELPER_SECRET`, ne starší než 2 minuty a jen jednou – zachycený příkaz nejde poslat znovu a heslo po síti nikdy nejde. Potvrzovací tlačítko u uspání/vypnutí platí 2 minuty a jen jednou.
+- Nahrávání přes Wi-Fi je chráněné heslem `OTA_PASSWORD`; bez něj je OTA vypnuté.
 - Licence: [MIT](LICENSE).
