@@ -194,7 +194,7 @@ New-NetFirewallRule -DisplayName "WoL spinac - ping" -Direction Inbound -Protoco
 1. Připoj ESP32 kabelem k PC.
    - Pokud ho Windows nepozná (ve Správci zařízení není nic pod *Porty (COM a LPT)*), doinstaluj ovladač **CP210x** ([Silicon Labs](https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers)) nebo **CH340** – podle čipu napsaného u USB konektoru na desce.
 2. Ve VS Code dole na modré liště klikni na **šipku →** (*PlatformIO: Upload*). Poprvé se stahuje spousta věcí, chvíli to trvá.
-   - Když se to zasekne na `Connecting.....`, podrž na desce tlačítko **BOOT**, dokud nahrávání nezačne.
+   - Když se to zasekne na `Connecting.....` nebo skončí chybou `Wrong boot mode detected`, podrž na desce tlačítko **BOOT**, spusť nahrávání znovu a drž ho, dokud nahrávání nezačne. (U některých desek je to potřeba pokaždé – je to normální.)
 3. Až uvidíš `SUCCESS`, klikni dole na ikonu **zástrčky** (*Serial Monitor*).
 
 ### 5d) Připojení ESP32 k Wi-Fi (z mobilu)
