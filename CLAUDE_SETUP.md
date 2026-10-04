@@ -70,8 +70,8 @@ Kroky:
 
 6) Firmware. Ověř, že je ESP32 připojené (najdi COM port, např. `pio device list`). Pokud žádný port
    není, poraď mi s ovladačem CP210x nebo CH340 a s datovým kabelem.
-   Spusť `pio run` a pak `pio run -t upload`. Kdyby nahrávání viselo na "Connecting...", řekni mi, ať podržím
-   tlačítko BOOT. Kdyby build hlásil chybějící Python modul (např. intelhex), doinstaluj ho do Pythonu PlatformIO
+   Spusť `pio run` a pak `pio run -t upload`. Kdyby nahrávání viselo na "Connecting..." nebo skončilo chybou
+   "Wrong boot mode detected", řekni mi, ať podržím tlačítko BOOT, a nahrávání spusť znovu (u některých desek je to potřeba pokaždé). Kdyby build hlásil chybějící Python modul (např. intelhex), doinstaluj ho do Pythonu PlatformIO
    (%USERPROFILE%\.platformio\penv\Scripts\python.exe -m pip install <modul>).
    Potom spusť sériový monitor s časovým limitem (např. přes Python a pyserial z PlatformIO, 115200 baudů,
    cca 60 s, ať se nezasekneš na interaktivním `pio device monitor`) a vysvětli mi, co ESP32 vypisuje.
