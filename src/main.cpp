@@ -13,7 +13,9 @@
  *  - Uspat/vypnout PC umí přes malého pomocníka na PC (složka pc-helper).
  *  - Nový firmware jde nahrát přes Wi-Fi (OTA), bez kabelu.
  *
- * Údaje (token, chat ID, MAC a IP PC, hesla) jsou v include/secrets.h.
+ * Údaje (token, chat ID, MAC a IP PC, hesla) se zadávají v nastavovací Wi-Fi
+ * "WoL-Spinac" a ukládají se do paměti ESP32. Volitelně jdou dosadit jako
+ * výchozí hodnoty z include/secrets.h (viz secrets.example.h).
  */
 
 #include <Arduino.h>
@@ -35,10 +37,14 @@
 
 #include "telegram_cert.h"
 
-#if __has_include("secrets.h")
+#include <vector>
+
+// secrets.h je nepovinný: dosadí výchozí hodnoty, které se pak dají přepsat
+// v nastavovacím portálu. Univerzální firmware (prostředí "release") ho
+// záměrně nepoužije, aby do něj nikdy nezaletěly cizí údaje.
+#if !defined(WOL_NO_SECRETS) && __has_include("secrets.h")
 #include "secrets.h"
-#else
-#error "Chybí include/secrets.h – zkopíruj include/secrets.example.h jako include/secrets.h a vyplň ho."
+#define HAVE_SECRETS 1
 #endif
 
 // Starší secrets.h nemusí obsahovat novější položky, proto výchozí hodnoty.
@@ -55,7 +61,7 @@
 #define PC_HELPER_PORT 8766
 #endif
 
-static const char *FW_VERSION = "1.1.0";
+static const char *FW_VERSION = "1.2.0";
 
 // ---------------------------------------------------------------------
 //  Nastavení (běžně není třeba měnit)
@@ -69,7 +75,8 @@ static const int BOOT_BUTTON_PIN = 0;
 // Název Wi-Fi sítě, kterou ESP32 vytvoří, když se nemůže připojit.
 static const char *PORTAL_SSID = "WoL-Spinac";
 // Jak dlouho je nastavovací Wi-Fi otevřená, než se ESP32 restartuje a zkusí to znovu.
-static const uint32_t PORTAL_TIMEOUT_S = 180;
+// (Déle než dřív, protože se tu opisuje token a další údaje.)
+static const uint32_t PORTAL_TIMEOUT_S = 600;
 // Jak dlouho zkoušet uloženou Wi-Fi, než se otevře nastavovací Wi-Fi.
 static const uint32_t WIFI_CONNECT_TIMEOUT_S = 30;
 
@@ -117,14 +124,24 @@ static const uint32_t WATCHDOG_TIMEOUT_S = 60;
 // ---------------------------------------------------------------------
 
 WiFiClientSecure secureClient;
-UniversalTelegramBot bot(BOT_TOKEN, secureClient);
+UniversalTelegramBot bot("", secureClient);  // token se doplní z nastavení v setup()
 WiFiUDP udp;
 WakeOnLan wol(udp);
 Ticker ledBlinker;
 Preferences prefs;
 IPAddress pcIp;
 
-static const size_t ALLOWED_CHAT_COUNT = sizeof(ALLOWED_CHAT_IDS) / sizeof(ALLOWED_CHAT_IDS[0]);
+// Nastavení zadané v portálu (uložené v paměti ESP32).
+struct Config {
+  String botToken;      // token od @BotFather
+  String chatIds;       // povolená chat ID oddělená čárkou
+  String pcMac;         // MAC kabelové síťovky PC
+  String pcIp;          // IP PC v domácí síti
+  String helperSecret;  // heslo pomocníka na PC (prázdné = uspání/vypnutí vypnuto)
+  String otaPassword;   // heslo pro OTA (prázdné = OTA vypnuto)
+};
+Config cfg;
+std::vector<String> allowedChats;
 
 uint32_t lastBotPollMs = 0;
 uint32_t lastTelegramCheckMs = 0;
@@ -216,17 +233,17 @@ void watchdogFeed() {
 // ---------------------------------------------------------------------
 
 bool helperConfigured() {
-  return strlen(PC_HELPER_SECRET) > 0;
+  return cfg.helperSecret.length() > 0;
 }
 
 bool otaConfigured() {
-  return strlen(OTA_PASSWORD) > 0;
+  return cfg.otaPassword.length() > 0;
 }
 
 // Je chat ID na seznamu povolených?
 bool isAllowedChat(const String &chatId) {
-  for (size_t i = 0; i < ALLOWED_CHAT_COUNT; i++) {
-    if (chatId == ALLOWED_CHAT_IDS[i]) return true;
+  for (const String &id : allowedChats) {
+    if (chatId == id) return true;
   }
   return false;
 }
@@ -286,9 +303,9 @@ void sendWithMenu(const String &chatId, const String &text) {
 
 // Pošle zprávu všem povoleným uživatelům (kromě exceptChatId, pokud je zadané).
 void notifyAllowedUsers(const String &text, const String &exceptChatId = "") {
-  for (size_t i = 0; i < ALLOWED_CHAT_COUNT; i++) {
-    if (exceptChatId == ALLOWED_CHAT_IDS[i]) continue;
-    sendWithMenu(ALLOWED_CHAT_IDS[i], text);
+  for (const String &id : allowedChats) {
+    if (exceptChatId == id) continue;
+    sendWithMenu(id, text);
   }
 }
 
@@ -314,8 +331,93 @@ bool bootButtonHeldAtStart() {
   return held;
 }
 
-// Připojení k Wi-Fi přes WiFiManager. Pokud uložená Wi-Fi nefunguje,
-// ESP32 vytvoří vlastní Wi-Fi "WoL-Spinac" s nastavovací stránkou (captive portal).
+// ---------------------------------------------------------------------
+//  Nastavení (paměť ESP32 + nastavovací portál)
+// ---------------------------------------------------------------------
+
+// Rozdělí text s chat ID (čárky, mezery, středníky) na seznam; nechá jen číslice a mínus.
+std::vector<String> parseChatIds(const String &text) {
+  std::vector<String> ids;
+  String current;
+  for (size_t i = 0; i <= text.length(); i++) {
+    char c = i < text.length() ? text[i] : ',';
+    if (isDigit(c) || (c == '-' && current.length() == 0)) {
+      current += c;
+    } else if (c == ',' || c == ';' || c == ' ' || c == '\n' || c == '\r' || c == '\t') {
+      if (current.length() > 0 && current != "-") ids.push_back(current);
+      current = "";
+    }
+  }
+  return ids;
+}
+
+// Chat ID znovu spojená čárkami (čistý zápis do paměti).
+String joinChatIds(const std::vector<String> &ids) {
+  String joined;
+  for (const String &id : ids) joined += String(joined.length() ? "," : "") + id;
+  return joined;
+}
+
+// MAC ve tvaru AA:BB:CC:DD:EE:FF (vstup smí mít pomlčky, dvojtečky nebo nic). Neplatná MAC = "".
+String normalizeMac(const String &text) {
+  String hex;
+  for (size_t i = 0; i < text.length(); i++) {
+    if (isxdigit(text[i])) hex += (char)toupper(text[i]);
+  }
+  if (hex.length() != 12) return "";
+  String mac;
+  for (int i = 0; i < 12; i += 2) {
+    if (i > 0) mac += ':';
+    mac += hex.substring(i, i + 2);
+  }
+  return mac;
+}
+
+// Text bez mezer na krajích.
+String trimmed(String s) {
+  s.trim();
+  return s;
+}
+
+bool configComplete() {
+  IPAddress ip;
+  return cfg.botToken.indexOf(':') > 0 && !parseChatIds(cfg.chatIds).empty() &&
+         normalizeMac(cfg.pcMac).length() > 0 && ip.fromString(cfg.pcIp);
+}
+
+// Načte nastavení z paměti ESP32; když tam nic není, vezme výchozí z (nepovinného) secrets.h.
+void loadConfig() {
+  cfg.botToken = prefs.getString("token", "");
+  cfg.chatIds = prefs.getString("chats", "");
+  cfg.pcMac = prefs.getString("mac", "");
+  cfg.pcIp = prefs.getString("ip", "");
+  cfg.helperSecret = prefs.getString("hsec", "");
+  cfg.otaPassword = prefs.getString("ota", "");
+#ifdef HAVE_SECRETS
+  if (!prefs.isKey("token")) {
+    cfg.botToken = BOT_TOKEN;
+    cfg.chatIds = "";
+    for (const char *id : ALLOWED_CHAT_IDS) cfg.chatIds += String(cfg.chatIds.length() ? "," : "") + id;
+    cfg.pcMac = PC_MAC;
+    cfg.pcIp = PC_IP;
+    cfg.helperSecret = PC_HELPER_SECRET;
+    cfg.otaPassword = OTA_PASSWORD;
+  }
+#endif
+}
+
+void saveConfig() {
+  prefs.putString("token", cfg.botToken);
+  prefs.putString("chats", cfg.chatIds);
+  prefs.putString("mac", cfg.pcMac);
+  prefs.putString("ip", cfg.pcIp);
+  prefs.putString("hsec", cfg.helperSecret);
+  prefs.putString("ota", cfg.otaPassword);
+}
+
+// Připojení k Wi-Fi přes WiFiManager. Pokud uložená Wi-Fi nefunguje nebo
+// chybí nastavení, ESP32 vytvoří vlastní Wi-Fi "WoL-Spinac" s nastavovací
+// stránkou (captive portal): Wi-Fi + token, chat ID, MAC a IP PC, hesla.
 void connectWifi() {
   WiFiManager wm;
   WiFi.mode(WIFI_STA);
@@ -325,16 +427,62 @@ void connectWifi() {
     wm.resetSettings();
   }
 
+  WiFiManagerParameter intro(
+      "<p><b>Údaje pro WoL spínač.</b> Pole s * jsou povinná. "
+      "Token a chat ID viz návod (Telegram), MAC a IP vypíše <code>windows-setup.ps1</code>.</p>");
+  WiFiManagerParameter pToken("token", "* Token bota z @BotFather", cfg.botToken.c_str(), 90);
+  WiFiManagerParameter pChats("chats", "* Chat ID (víc lidí odděl čárkou)", cfg.chatIds.c_str(), 80);
+  WiFiManagerParameter pMac("mac", "* MAC adresa PC (kabelová síťovka)", cfg.pcMac.c_str(), 20);
+  WiFiManagerParameter pIp("ip", "* IP adresa PC v domácí síti", cfg.pcIp.c_str(), 16);
+  WiFiManagerParameter pHelper("hsec", "Heslo pomocníka na PC (uspání/vypnutí, nepovinné)",
+                               cfg.helperSecret.c_str(), 64);
+  WiFiManagerParameter pOta("ota", "Heslo pro nahrávání firmwaru přes Wi-Fi (nepovinné)",
+                            cfg.otaPassword.c_str(), 64);
+  wm.addParameter(&intro);
+  wm.addParameter(&pToken);
+  wm.addParameter(&pChats);
+  wm.addParameter(&pMac);
+  wm.addParameter(&pIp);
+  wm.addParameter(&pHelper);
+  wm.addParameter(&pOta);
+
   ledStartBlinking(250);  // pomalé blikání = připojuji se
   wm.setConnectTimeout(WIFI_CONNECT_TIMEOUT_S);
   wm.setConfigPortalTimeout(PORTAL_TIMEOUT_S);
   wm.setTitle("WoL spínač");
 
+  bool needPortal = !configComplete();
   Serial.printf("[WiFi] Připojuji se (pokud to nepůjde, otevře se Wi-Fi \"%s\")...\n", PORTAL_SSID);
-  if (!wm.autoConnect(PORTAL_SSID, PORTAL_PASSWORD)) {
-    // Nikdo Wi-Fi nenastavil, nebo router ještě nenaběhl (např. po výpadku proudu).
+  if (needPortal) Serial.println(F("[Nastavení] Chybí údaje – otevírám nastavovací Wi-Fi."));
+  bool connected = needPortal ? wm.startConfigPortal(PORTAL_SSID, PORTAL_PASSWORD)
+                              : wm.autoConnect(PORTAL_SSID, PORTAL_PASSWORD);
+  if (!connected) {
+    // Nikdo nic nenastavil, nebo router ještě nenaběhl (např. po výpadku proudu).
     Serial.println(F("[WiFi] Nepřipojeno, restartuji a zkusím to znovu."));
     delay(1000);
+    ESP.restart();
+  }
+
+  // Hodnoty z portálu (když se portál neotevřel, jsou stejné jako dosavadní).
+  Config entered;
+  entered.botToken = trimmed(pToken.getValue());
+  entered.chatIds = joinChatIds(parseChatIds(pChats.getValue()));
+  String mac = normalizeMac(pMac.getValue());
+  entered.pcMac = mac.length() ? mac : trimmed(pMac.getValue());
+  entered.pcIp = trimmed(pIp.getValue());
+  entered.helperSecret = trimmed(pHelper.getValue());
+  entered.otaPassword = trimmed(pOta.getValue());
+  bool changed = entered.botToken != cfg.botToken || entered.chatIds != cfg.chatIds ||
+                 entered.pcMac != cfg.pcMac || entered.pcIp != cfg.pcIp ||
+                 entered.helperSecret != cfg.helperSecret || entered.otaPassword != cfg.otaPassword;
+  if (changed) {
+    cfg = entered;
+    saveConfig();
+    Serial.println(F("[Nastavení] Uloženo."));
+  }
+  if (!configComplete()) {
+    Serial.println(F("[Nastavení] Údaje jsou neúplné nebo neplatné (token, chat ID, MAC, IP) – otevřu portál znovu."));
+    delay(1500);
     ESP.restart();
   }
 
@@ -384,15 +532,15 @@ bool maintainWifi() {
 // ---------------------------------------------------------------------
 
 // Zapne OTA: z PlatformIO pak jde nahrát firmware přes Wi-Fi (prostředí "ota").
-// Bez hesla v secrets.h zůstane OTA vypnuté – do ESP32 by jinak mohl nahrát
+// Bez hesla v nastavení zůstane OTA vypnuté – do ESP32 by jinak mohl nahrát
 // cokoli kdokoli v domácí síti.
 void setupOta() {
   if (!otaConfigured()) {
-    Serial.println(F("[OTA] Vypnuto (v secrets.h chybí OTA_PASSWORD)."));
+    Serial.println(F("[OTA] Vypnuto (v nastavení chybí heslo pro OTA)."));
     return;
   }
   ArduinoOTA.setHostname(OTA_HOSTNAME);
-  ArduinoOTA.setPassword(OTA_PASSWORD);
+  ArduinoOTA.setPassword(cfg.otaPassword.c_str());
   ArduinoOTA.onStart([]() {
     Serial.println(F("[OTA] Nahrávám nový firmware..."));
     ledStartBlinking(100);
@@ -441,7 +589,7 @@ void syncClock() {
 // vypnuté. Jinak by se třeba po výpadku proudu PC samo zaplo kvůli
 // starému /wake. Zkouší to, dokud se to nepovede (Telegram musí odpovědět).
 void skipPendingMessages() {
-  String command = String("bot") + BOT_TOKEN + "/getUpdates?offset=-1&limit=1";
+  String command = String("bot") + cfg.botToken + "/getUpdates?offset=-1&limit=1";
   for (uint8_t attempt = 1; attempt <= 10; attempt++) {
     watchdogFeed();
     String response = bot.sendGetToTelegram(command);
@@ -476,13 +624,13 @@ bool isOldMessage(const telegramMessage &msg) {
 //  Pomocník na PC (uspání / vypnutí)
 // ---------------------------------------------------------------------
 
-// HMAC-SHA256 podpis zprávy tajným heslem PC_HELPER_SECRET (hex text).
+// HMAC-SHA256 podpis zprávy tajným heslem pomocníka (hex text).
 // Heslo samotné po síti nikdy nejde – jen podpis, který platí pro
 // jeden příkaz a krátkou dobu, takže ho nejde zachytit a použít znovu.
 String hmacSha256Hex(const String &message) {
   uint8_t out[32];
   mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
-                  (const uint8_t *)PC_HELPER_SECRET, strlen(PC_HELPER_SECRET),
+                  (const uint8_t *)cfg.helperSecret.c_str(), cfg.helperSecret.length(),
                   (const uint8_t *)message.c_str(), message.length(), out);
   char hex[65];
   for (int i = 0; i < 32; i++) sprintf(hex + i * 2, "%02x", out[i]);
@@ -539,7 +687,7 @@ String helperErrorText(HelperResult r) {
     case HELPER_UNREACHABLE:
       return "⚠️ Pomocník na PC neodpovídá. Běží na PC úloha „WoL spinac helper“? (README → Uspání a vypnutí)";
     case HELPER_BAD_SECRET:
-      return "⚠️ Pomocník na PC odmítl příkaz – nesedí heslo PC_HELPER_SECRET, nebo má PC/ESP32 špatný čas.";
+      return "⚠️ Pomocník na PC odmítl příkaz – nesedí heslo pomocníka, nebo má PC/ESP32 špatný čas.";
     default:
       return "⚠️ Pomocník na PC vrátil chybu. Podrobnosti jsou v C:\\ProgramData\\WoLSpinac\\helper.log.";
   }
@@ -654,8 +802,8 @@ bool sendWakePacket() {
   IPAddress broadcast = wol.calculateBroadcastAddress(WiFi.localIP(), WiFi.subnetMask());
   wol.setBroadcastAddress(broadcast);
   wol.setRepeat(WOL_REPEAT, WOL_REPEAT_DELAY_MS);
-  Serial.printf("[WoL] Posílám magic packet na %s pro MAC %s\n", broadcast.toString().c_str(), PC_MAC);
-  bool ok = wol.sendMagicPacket(PC_MAC, WOL_PORT);
+  Serial.printf("[WoL] Posílám magic packet na %s pro MAC %s\n", broadcast.toString().c_str(), cfg.pcMac.c_str());
+  bool ok = wol.sendMagicPacket(cfg.pcMac.c_str(), WOL_PORT);
   ledFlash(3);
   return ok;
 }
@@ -675,7 +823,7 @@ void cmdWake(const String &chatId) {
   }
 
   if (!sendWakePacket()) {
-    bot.sendMessage(chatId, "⚠️ Magic packet se nepodařilo odeslat. Zkontroluj MAC adresu v secrets.h.", "");
+    bot.sendMessage(chatId, "⚠️ Magic packet se nepodařilo odeslat. Zkontroluj MAC adresu v nastavení (podrž BOOT při zapnutí).", "");
     return;
   }
   bot.sendMessage(chatId, "📨 Magic packet odeslán, čekám až 90 s, jestli PC naběhne…", "");
@@ -692,7 +840,7 @@ void cmdWake(const String &chatId) {
 // Uspání/vypnutí – první krok: zeptá se, jestli to uživatel myslí vážně.
 void askConfirm(const String &chatId, const String &action) {
   if (!helperConfigured()) {
-    bot.sendMessage(chatId, "Uspání a vypnutí není nastavené (chybí PC_HELPER_SECRET v secrets.h a pomocník na PC).", "");
+    bot.sendMessage(chatId, "Uspání a vypnutí není nastavené (v nastavení chybí heslo pomocníka a pomocník na PC).", "");
     return;
   }
   bool sleep = action == "sleep";
@@ -860,14 +1008,14 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
-  if (!pcIp.fromString(PC_IP)) {
-    Serial.printf("[Chyba] PC_IP \"%s\" v secrets.h není platná IP adresa!\n", PC_IP);
-  }
-
   prefs.begin("wol", false);
   notifyEnabled = prefs.getBool("notify", true);
+  loadConfig();
 
-  connectWifi();
+  connectWifi();  // otevře portál, když chybí Wi-Fi nebo nastavení; po návratu je cfg platné
+  pcIp.fromString(cfg.pcIp);
+  allowedChats = parseChatIds(cfg.chatIds);
+  bot.updateToken(cfg.botToken);
   watchdogStart();
   setupOta();
 

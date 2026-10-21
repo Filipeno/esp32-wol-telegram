@@ -26,6 +26,17 @@ Nový firmware jde do spínače nahrát i **přes Wi-Fi**, bez odpojování ([vi
 
 ---
 
+> ### 🌐 Nejrychlejší cesta: webový nahrávač (bez instalace čehokoli)
+> 1. Na PC spusť jako správce PowerShell a vlož
+>    `irm https://raw.githubusercontent.com/Filipeno/esp32-wol-telegram/main/scripts/windows-setup.ps1 | iex`
+>    – nastaví Wake-on-LAN ve Windows a vypíše MAC a IP adresu PC.
+> 2. Otevři **<https://filipeno.github.io/esp32-wol-telegram/>** v Chrome/Edge, připoj ESP32 a klikni na tlačítko pro nahrání.
+> 3. Z mobilu se připoj k Wi-Fi `WoL-Spinac` a v nastavovací stránce zadej domácí Wi-Fi, token bota, chat ID, MAC a IP.
+>
+> Token a chat ID získáš podle [kroku 2](#krok-2--založení-telegram-bota); BIOS (krok 4a) a router (krok 3b) zůstávají ruční.
+> Údaje se ukládají do paměti ESP32 – `secrets.h` ani PlatformIO už nejsou potřeba (jen pro vývojáře).
+> Změna údajů později: podrž při zapnutí tlačítko **BOOT**, otevře se stejná nastavovací stránka.
+
 > ### ⚡ Rychlá cesta: nech se provést Claude Code
 > Máš na PC [Claude Code](https://claude.com/claude-code)? Otevři soubor **[CLAUDE_SETUP.md](CLAUDE_SETUP.md)**,
 > zkopíruj z něj prompt do Claude Code (spuštěného ve složce tohoto projektu) a on tě celým nastavením provede

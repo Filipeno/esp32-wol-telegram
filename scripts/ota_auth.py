@@ -6,8 +6,8 @@ import re
 Import("env")  # noqa: F821 – dodává PlatformIO
 
 secrets_path = os.path.join(env.subst("$PROJECT_INCLUDE_DIR"), "secrets.h")  # noqa: F821
-password = ""
-if os.path.isfile(secrets_path):
+password = os.environ.get("WOL_OTA_PASSWORD", "")  # heslo zadané v portálu; jinak se čte ze secrets.h
+if not password and os.path.isfile(secrets_path):
     with open(secrets_path, encoding="utf-8") as f:
         match = re.search(r'^\s*#define\s+OTA_PASSWORD\s+"([^"]*)"', f.read(), re.MULTILINE)
     if match:
@@ -16,4 +16,4 @@ if os.path.isfile(secrets_path):
 if password:
     env.Append(UPLOAD_FLAGS=["--auth=" + password])  # noqa: F821
 else:
-    print("*** OTA_PASSWORD v include/secrets.h je prázdné – nahrávání přes Wi-Fi nepůjde. ***")
+    print("*** Heslo pro OTA chybí (proměnná WOL_OTA_PASSWORD nebo OTA_PASSWORD v include/secrets.h) – nahrávání přes Wi-Fi nepůjde. ***")

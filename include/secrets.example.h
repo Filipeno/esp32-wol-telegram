@@ -4,6 +4,10 @@
 //  ŠABLONA – zkopíruj tento soubor jako "secrets.h" (do stejné složky)
 //  a vyplň vlastní údaje. Soubor secrets.h se NIKDY nenahrává na GitHub
 //  (je v .gitignore), protože obsahuje token bota.
+//
+//  Od verze 1.2.0 je secrets.h NEPOVINNÝ: stejné údaje jdou zadat v nastavovací
+//  Wi-Fi "WoL-Spinac" (viz webový nahrávač). Tady zadané hodnoty slouží jen jako
+//  výchozí při prvním spuštění; co se uloží v portálu, má přednost.
 // =====================================================================
 
 // Token Telegram bota od @BotFather (vypadá jako 123456789:AAH...)

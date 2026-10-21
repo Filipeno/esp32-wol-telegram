@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WoL spínač – nahrání firmwaru</title>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.55; color: #222; }
+    h1 { margin-bottom: .2rem; }
+    ol li { margin-bottom: .6rem; }
+    code { background: #eee; padding: .1rem .3rem; border-radius: 3px; }
+    .flash { margin: 1.5rem 0; padding: 1.2rem; border: 2px solid #0a7; border-radius: 8px; text-align: center; }
+    .note { font-size: .9rem; color: #555; }
+  </style>
+</head>
+<body>
+  <h1>🖥️ WoL spínač přes Telegram</h1>
+  <p>Nahrání firmwaru do ESP32 přímo z prohlížeče – bez instalace PlatformIO a bez Claude Code.</p>
+
+  <h2>1. Nejdřív na PC</h2>
+  <p>Na PC, které chceš budit, spusť jako správce PowerShell a vlož:</p>
+  <p><code>irm https://raw.githubusercontent.com/Filipeno/esp32-wol-telegram/main/scripts/windows-setup.ps1 | iex</code></p>
+  <p>Skript nastaví Wake-on-LAN ve Windows a vypíše <b>MAC</b> a <b>IP</b> adresu PC (opiš si je, budou se hodit v kroku 3).</p>
+
+  <h2>2. Nahraj firmware</h2>
+  <ol>
+    <li>Použij <b>Chrome</b> nebo <b>Edge</b> na počítači (Firefox a Safari to neumí).</li>
+    <li>Připoj ESP32 USB kabelem, který přenáší data.</li>
+    <li>Klikni na tlačítko a vyber port ESP32. Kdyby nahrávání viselo na „Connecting…“, podrž na desce tlačítko <b>BOOT</b>.</li>
+  </ol>
+  <div class="flash">
+    <esp-web-install-button manifest="manifest.json">
+      <span slot="unsupported">Tenhle prohlížeč USB nepodporuje – otevři stránku v Chrome nebo Edge.</span>
+      <span slot="not-allowed">Stránka musí běžet přes https://.</span>
+    </esp-web-install-button>
+  </div>
+
+  <h2>3. Nastav spínač z mobilu</h2>
+  <ol>
+    <li>V telefonu se připoj k Wi-Fi <b>WoL-Spinac</b> (heslo <code>wolspinac</code>). Otevře se nastavovací stránka (když ne, jdi na <code>192.168.4.1</code>).</li>
+    <li>Vyber domácí <b>2,4 GHz</b> Wi-Fi a zadej její heslo.</li>
+    <li>Vyplň <b>token bota</b> (z @BotFather), <b>chat ID</b> (z @userinfobot), <b>MAC</b> a <b>IP</b> PC z kroku 1. Ulož.</li>
+    <li>Do minuty ti bot napíše <b>„✅ WoL spínač online“</b>. Hotovo.</li>
+  </ol>
+
+  <p class="note">Úplný návod (BIOS, router, Tailscale, Apollo, řešení problémů):
+    <a href="https://github.com/Filipeno/esp32-wol-telegram#readme">README na GitHubu</a>.
+    Údaje se ukládají jen do paměti ESP32, nikam jinam se neposílají.</p>
+</body>
+</html>
