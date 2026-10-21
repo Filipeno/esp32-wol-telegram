@@ -61,7 +61,7 @@
 #define PC_HELPER_PORT 8766
 #endif
 
-static const char *FW_VERSION = "1.2.0";
+static const char *FW_VERSION = "1.2.1";
 
 // ---------------------------------------------------------------------
 //  Nastavení (běžně není třeba měnit)
@@ -421,6 +421,11 @@ void saveConfig() {
 void connectWifi() {
   WiFiManager wm;
   WiFi.mode(WIFI_STA);
+  // Jedno jméno pro 2,4 i 5 GHz: ESP32 umí jen 2,4 GHz, proto prohledá všechny
+  // kanály a připojí se k nejsilnějšímu 2,4GHz vysílači (ne k prvnímu nalezenému).
+  WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+  WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+  WiFi.setSleep(false);  // stabilnější spojení a rychlejší odezva
 
   if (bootButtonHeldAtStart()) {
     Serial.println(F("[WiFi] Tlačítko BOOT drženo – mažu uloženou Wi-Fi."));
