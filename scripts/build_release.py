@@ -5,6 +5,7 @@ Výstup: docs/firmware/wol-spinac.bin (celý obraz flash od adresy 0x0) a docs/m
 """
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +32,9 @@ subprocess.run([
     "0xe000", str(boot_app0),
     "0x10000", str(build / "firmware.bin"),
 ], check=True)
+
+# Samotna aplikace pro aktualizaci pres pomocnika na PC (bez bootloaderu a tabulky oddilu).
+shutil.copyfile(build / "firmware.bin", out.parent / "app.bin")
 
 version = re.search(r'FW_VERSION = "([^"]+)"', (root / "src" / "main.cpp").read_text(encoding="utf-8")).group(1)
 manifest = {

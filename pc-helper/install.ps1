@@ -1,4 +1,4 @@
-# WoL spinac - instalace pomocnika na PC (uspani a vypnuti z Telegramu)
+# WoL spinac - instalace pomocnika na PC (uspani, vypnuti a aktualizace z Telegramu)
 # =====================================================================
 # Spust v PowerShellu JAKO SPRAVCE (pravym na Start -> Terminal (spravce)):
 #   cd <slozka projektu>\pc-helper
@@ -16,7 +16,9 @@
 
 param(
     [string]$Secret = "",
-    [int]$Port = 8766
+    [int]$Port = 8766,
+    # "power" = uspani/vypnuti, "update" = aktualizace firmwaru ESP32 pres tohle PC
+    [string]$Features = "power update"
 )
 
 $ErrorActionPreference = "Stop"
@@ -55,6 +57,8 @@ Write-Host "2/5 Ukladam heslo (pristup jen SYSTEM a spravci)"
 $secretFile = Join-Path $InstallDir "secret.txt"
 Set-Content -Path $secretFile -Value $Secret -Encoding ASCII
 & icacls.exe $secretFile /inheritance:r /grant:r "*S-1-5-18:F" "*S-1-5-32-544:F" | Out-Null
+Set-Content -Path (Join-Path $InstallDir "features.txt") -Value $Features -Encoding ASCII
+Write-Host "    Povolene funkce: $Features"
 
 # --- Naplanovana uloha ---
 Write-Host "3/5 Vytvarim naplanovanou ulohu '$TaskName'"

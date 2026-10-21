@@ -24,6 +24,7 @@
 #include <WiFiClientSecure.h>
 #include <WiFiManager.h>
 #include <ArduinoOTA.h>
+#include <Update.h>
 #include <Preferences.h>
 #include <UniversalTelegramBot.h>
 #include <ArduinoJson.h>
@@ -33,7 +34,11 @@
 #include <esp_task_wdt.h>
 #include <esp_idf_version.h>
 #include <mbedtls/md.h>
+#include <mbedtls/sha256.h>
 #include <time.h>
+#include <lwip/etharp.h>
+#include <lwip/netif.h>
+#include <lwip/tcpip.h>
 
 #include "telegram_cert.h"
 
@@ -61,7 +66,7 @@
 #define PC_HELPER_PORT 8766
 #endif
 
-static const char *FW_VERSION = "1.2.3";
+static const char *FW_VERSION = "1.3.1";
 
 // ---------------------------------------------------------------------
 //  Nastavení (běžně není třeba měnit)
@@ -91,6 +96,10 @@ static const uint8_t WOL_REPEAT = 3;
 static const uint32_t WOL_REPEAT_DELAY_MS = 100;
 static const uint16_t WOL_PORT = 9;
 
+// Hledání PC podle MAC (když není zadaná IP): kolik času mezi prohledáváním sítě.
+static const uint32_t PC_DISCOVER_INTERVAL_MS = 60UL * 1000UL;
+static const uint32_t PC_DISCOVER_FAST_INTERVAL_MS = 8UL * 1000UL;  // po /wake
+
 // Hlídání PC pingem: normálně každých 30 s; po /wake nebo vypnutí každé 3 s.
 static const uint32_t PC_MONITOR_INTERVAL_MS = 30UL * 1000UL;
 static const uint32_t PC_FAST_PING_INTERVAL_MS = 3000;
@@ -107,6 +116,14 @@ static const uint32_t CONFIRM_VALID_MS = 120UL * 1000UL;
 // Pomocník na PC: jak dlouho čekat na spojení a na odpověď.
 static const uint32_t HELPER_CONNECT_TIMEOUT_MS = 2000;
 static const uint32_t HELPER_RESPONSE_TIMEOUT_MS = 3000;
+// Aktualizace: pomocník stahuje z GitHubu, proto se čeká déle.
+static const uint32_t HELPER_DOWNLOAD_TIMEOUT_MS = 30UL * 1000UL;
+// Automatická kontrola nové verze (přes pomocníka na PC, takže jen když PC běží).
+static const uint32_t UPDATE_FIRST_CHECK_MS = 5UL * 60UL * 1000UL;
+static const uint32_t UPDATE_CHECK_INTERVAL_MS = 6UL * 60UL * 60UL * 1000UL;
+static const uint32_t UPDATE_RETRY_INTERVAL_MS = 30UL * 60UL * 1000UL;  // PC bylo vypnuté / chyba
+// Aktualizace: přenos se vzdá, když 15 s nepřijdou žádná data.
+static const uint32_t FIRMWARE_STALL_TIMEOUT_MS = 15UL * 1000UL;
 
 // Výpadek Wi-Fi: každých 15 s zkusit znovu připojit, po 10 minutách restart.
 static const uint32_t WIFI_RETRY_INTERVAL_MS = 15UL * 1000UL;
@@ -129,14 +146,16 @@ WiFiUDP udp;
 WakeOnLan wol(udp);
 Ticker ledBlinker;
 Preferences prefs;
-IPAddress pcIp;
+IPAddress pcIp;                 // 0.0.0.0 = zatím neznámá (hledá se podle MAC)
+uint32_t lastDiscoverMs = 0;
+String normalizeMac(const String &text);
 
 // Nastavení zadané v portálu (uložené v paměti ESP32).
 struct Config {
   String botToken;      // token od @BotFather
   String chatIds;       // povolená chat ID oddělená čárkou
   String pcMac;         // MAC kabelové síťovky PC
-  String pcIp;          // IP PC v domácí síti
+  String pcIp;          // IP PC v domácí síti (prázdné = najde se samo podle MAC)
   String helperSecret;  // heslo pomocníka na PC (prázdné = uspání/vypnutí vypnuto)
   String otaPassword;   // heslo pro OTA (prázdné = OTA vypnuto)
 };
@@ -167,9 +186,11 @@ uint32_t pendingStartMs = 0;
 bool pendingIsSleep = false;    // u PENDING_OFF: uspání (true), nebo vypnutí (false)
 
 // Otevřené potvrzení uspání/vypnutí (tlačítko "Ano").
-String confirmAction;           // "sleep" / "shutdown" / "" = nic
+String confirmAction;           // "sleep" / "shutdown" / "update" / "" = nic
 uint32_t confirmNonce = 0;
 uint32_t confirmStartMs = 0;
+uint32_t nextUpdateCheckMs = 0;  // kdy se příště zeptat na novou verzi
+String updateVersion;           // verze nabídnutá k aktualizaci
 
 // ---------------------------------------------------------------------
 //  LED
@@ -273,9 +294,97 @@ String formatWifiSignal() {
   return String(rssi) + " dBm (" + quality + ")";
 }
 
-// Odpovídá PC na ping? (1 pokus, cca 1 s)
+// MAC adresa PC jako 6 bajtů. Vrací false, když je neplatná.
+bool pcMacBytes(uint8_t out[6]) {
+  String mac = normalizeMac(cfg.pcMac);
+  if (mac.length() != 17) return false;
+  for (int i = 0; i < 6; i++) out[i] = (uint8_t)strtol(mac.substring(i * 3, i * 3 + 2).c_str(), nullptr, 16);
+  return true;
+}
+
+bool pcIpKnown() {
+  return (uint32_t)pcIp != 0;
+}
+
+// Pošle ARP dotaz na danou IP (PC odpoví i při zablokovaném pingu).
+void arpRequest(const IPAddress &ip) {
+  ip4_addr_t addr;
+  addr.addr = (uint32_t)ip;
+  LOCK_TCPIP_CORE();
+  etharp_request(netif_default, &addr);
+  UNLOCK_TCPIP_CORE();
+}
+
+// Smaže ARP tabulku, aby v ní zůstaly jen čerstvé odpovědi (ne záznam vypnutého PC).
+void arpClear() {
+  LOCK_TCPIP_CORE();
+  etharp_cleanup_netif(netif_default);
+  UNLOCK_TCPIP_CORE();
+}
+
+// Najde v ARP tabulce záznam s danou MAC.
+bool arpFind(const uint8_t mac[6], IPAddress &found) {
+  bool ok = false;
+  LOCK_TCPIP_CORE();
+  for (size_t i = 0; i < ARP_TABLE_SIZE && !ok; i++) {
+    ip4_addr_t *ip;
+    struct netif *nif;
+    struct eth_addr *eth;
+    if (etharp_get_entry(i, &ip, &nif, &eth) && memcmp(eth->addr, mac, 6) == 0) {
+      found = IPAddress(ip4_addr_get_u32(ip));
+      ok = true;
+    }
+  }
+  UNLOCK_TCPIP_CORE();
+  return ok;
+}
+
+// Projde podsíť /24 kolem ESP32 ARP dotazy a podle MAC najde PC. Trvá asi 2 s.
+// Tabulka ARP je malá (10 záznamů), proto se čte po dávkách.
+bool discoverPcIp(IPAddress &found) {
+  uint8_t mac[6];
+  if (!pcMacBytes(mac)) return false;
+  IPAddress me = WiFi.localIP();
+  arpClear();
+  for (int base = 1; base <= 254; base += 8) {
+    for (int host = base; host < base + 8 && host <= 254; host++) {
+      if (host == me[3]) continue;
+      arpRequest(IPAddress(me[0], me[1], me[2], host));
+    }
+    delay(60);
+    watchdogFeed();
+    if (arpFind(mac, found)) return true;
+  }
+  return false;
+}
+
+// Odpovídá PC? Se zadanou IP stačí ping. Bez ní (nebo když se IP změnila)
+// se PC hledá podle MAC přes ARP; ARP funguje i když PC ping blokuje.
 bool isPcOnline() {
-  return Ping.ping(pcIp, 1);
+  bool fixedIp = cfg.pcIp.length() > 0;
+  if (pcIpKnown() && Ping.ping(pcIp, 1)) return true;
+  if (fixedIp) return false;
+
+  uint8_t mac[6];
+  if (!pcMacBytes(mac)) return false;
+  IPAddress found;
+  if (pcIpKnown()) {  // stejná IP jako minule, jen neodpovídá na ping?
+    arpClear();
+    arpRequest(pcIp);
+    delay(200);
+    if (arpFind(mac, found) && found == pcIp) return true;
+  }
+
+  uint32_t now = millis();
+  uint32_t interval = pending != PENDING_NONE ? PC_DISCOVER_FAST_INTERVAL_MS : PC_DISCOVER_INTERVAL_MS;
+  if (lastDiscoverMs != 0 && now - lastDiscoverMs < interval) return false;
+  lastDiscoverMs = now == 0 ? 1 : now;
+  if (!discoverPcIp(found)) return false;
+  if (found != pcIp) {
+    Serial.printf("[PC] Nalezeno podle MAC: %s\n", found.toString().c_str());
+    pcIp = found;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------
@@ -290,8 +399,10 @@ String mainKeyboard() {
     kb += F("[{\"text\":\"😴 Uspat\",\"callback_data\":\"sleep\"},"
             "{\"text\":\"⏻ Vypnout\",\"callback_data\":\"shutdown\"}],");
   }
-  kb += notifyEnabled ? F("[{\"text\":\"🔕 Vypnout oznámení\",\"callback_data\":\"notify\"}]]")
-                      : F("[{\"text\":\"🔔 Zapnout oznámení\",\"callback_data\":\"notify\"}]]");
+  kb += notifyEnabled ? F("[{\"text\":\"🔕 Vypnout oznámení\",\"callback_data\":\"notify\"}")
+                      : F("[{\"text\":\"🔔 Zapnout oznámení\",\"callback_data\":\"notify\"}");
+  if (helperConfigured()) kb += F(",{\"text\":\"🔄 Aktualizace\",\"callback_data\":\"update\"}");
+  kb += F("]]");
   return kb;
 }
 
@@ -382,7 +493,7 @@ String trimmed(String s) {
 bool configComplete() {
   IPAddress ip;
   return cfg.botToken.indexOf(':') > 0 && !parseChatIds(cfg.chatIds).empty() &&
-         normalizeMac(cfg.pcMac).length() > 0 && ip.fromString(cfg.pcIp);
+         normalizeMac(cfg.pcMac).length() > 0 && (cfg.pcIp.length() == 0 || ip.fromString(cfg.pcIp));
 }
 
 // Načte nastavení z paměti ESP32; když tam nic není, vezme výchozí z (nepovinného) secrets.h.
@@ -434,13 +545,13 @@ void connectWifi() {
 
   WiFiManagerParameter intro(
       "<p><b>Údaje pro WoL spínač.</b> Pole s * jsou povinná. "
-      "Token a chat ID viz návod (Telegram), MAC a IP vypíše <code>windows-setup.ps1</code>.</p>");
+      "Token a chat ID viz návod (Telegram), MAC vypíše <code>windows-setup.ps1</code>. IP můžeš nechat prázdnou.</p>");
   // Tajná pole se neukazují (ochrana před zablesknutím v portálu); necháváme je prázdná.
   // Když uživatel vyplní nový, použije se; když nevyplní, zůstane starý.
   WiFiManagerParameter pToken("wol_token", "* Token bota z @BotFather", "", 90);
   WiFiManagerParameter pChats("wol_chats", "* Chat ID (víc lidí odděl čárkou)", cfg.chatIds.c_str(), 80);
   WiFiManagerParameter pMac("wol_mac", "* MAC adresa PC (kabelová síťovka)", cfg.pcMac.c_str(), 20);
-  WiFiManagerParameter pIp("wol_pcip", "* IP adresa PC v domácí síti", cfg.pcIp.c_str(), 16);
+  WiFiManagerParameter pIp("wol_pcip", "IP adresa PC (nepovinné: když necháš prázdné, spínač PC najde podle MAC)", cfg.pcIp.c_str(), 16);
   WiFiManagerParameter pHelper("wol_hsec", "Heslo pomocníka na PC (uspání/vypnutí, nepovinné)",
                                "", 64);
   WiFiManagerParameter pOta("wol_ota", "Heslo pro nahrávání firmwaru přes Wi-Fi (nepovinné)",
@@ -497,7 +608,7 @@ void connectWifi() {
     Serial.println(F("[Nastavení] Uloženo."));
   }
   if (!configComplete()) {
-    Serial.println(F("[Nastavení] Údaje jsou neúplné nebo neplatné (token, chat ID, MAC, IP) – otevřu portál znovu."));
+    Serial.println(F("[Nastavení] Údaje jsou neúplné nebo neplatné (token, chat ID, MAC; IP buď prázdná, nebo platná) – otevřu portál znovu."));
     delay(1500);
     ESP.restart();
   }
@@ -654,45 +765,88 @@ String hmacSha256Hex(const String &message) {
 }
 
 // Výsledky volání pomocníka.
-enum HelperResult : uint8_t { HELPER_OK, HELPER_NO_CLOCK, HELPER_UNREACHABLE, HELPER_BAD_SECRET, HELPER_ERROR };
+enum HelperResult : uint8_t {
+  HELPER_OK, HELPER_NO_CLOCK, HELPER_UNREACHABLE, HELPER_BAD_SECRET, HELPER_DISABLED, HELPER_ERROR
+};
 
-// Pošle pomocníkovi na PC příkaz ("status", "sleep" nebo "shutdown").
-HelperResult callPcHelper(const char *action) {
-  if (!clockValid()) return HELPER_NO_CLOCK;
-  String timestamp = String((long)time(nullptr));
+// Odpověď pomocníka: kód a hlavičky, které nás zajímají. Tělo zůstává v klientovi.
+struct HelperResponse {
+  int code = 0;
+  long length = -1;
+  String version;  // X-Version: nejnovější verze firmwaru
+  String sha256;   // X-Sha256: otisk posílaného firmwaru
+  String fwSig;    // X-Fw-Sig: podpis otisku heslem pomocníka
+};
+
+HelperResult codeToResult(int code) {
+  if (code == 200) return HELPER_OK;
+  if (code == 401) return HELPER_BAD_SECRET;
+  if (code == 403) return HELPER_DISABLED;
+  if (code == 0) return HELPER_UNREACHABLE;
+  return HELPER_ERROR;
+}
+
+// Pošle pomocníkovi podepsaný příkaz a přečte stavový řádek a hlavičky odpovědi.
+void helperOpen(WiFiClient &client, const char *action, const String &timestamp, uint32_t timeoutMs,
+                HelperResponse &resp) {
   String signature = hmacSha256Hex(String(action) + ":" + timestamp);
-
-  WiFiClient client;
   if (!client.connect(pcIp, PC_HELPER_PORT, HELPER_CONNECT_TIMEOUT_MS)) {
     Serial.printf("[Pomocník] %s:%d neodpovídá.\n", pcIp.toString().c_str(), PC_HELPER_PORT);
-    return HELPER_UNREACHABLE;
+    return;
   }
   client.printf("POST /%s HTTP/1.0\r\nHost: %s\r\nX-Time: %s\r\nX-Sig: %s\r\nContent-Length: 0\r\n\r\n",
                 action, pcIp.toString().c_str(), timestamp.c_str(), signature.c_str());
 
-  // Stačí nám první řádek odpovědi, např. "HTTP/1.0 200 OK".
-  String statusLine;
+  String line;
+  bool statusRead = false;
   uint32_t start = millis();
-  while (millis() - start < HELPER_RESPONSE_TIMEOUT_MS) {
-    if (client.available()) {
-      char c = client.read();
-      if (c == '\n') break;
-      statusLine += c;
-    } else if (!client.connected()) {
-      break;
-    } else {
+  while (millis() - start < timeoutMs) {
+    if (!client.available()) {
+      if (!client.connected()) break;
       delay(10);
+      watchdogFeed();
+      continue;
     }
+    char c = client.read();
+    if (c == '\r') continue;
+    if (c != '\n') {
+      if (line.length() < 200) line += c;
+      continue;
+    }
+    if (!statusRead) {  // např. "HTTP/1.0 200 OK"
+      resp.code = line.startsWith("HTTP/") ? line.substring(9, 12).toInt() : 0;
+      statusRead = true;
+    } else if (line.length() == 0) {
+      return;  // konec hlaviček, dál je tělo
+    } else {
+      int colon = line.indexOf(':');
+      if (colon > 0) {
+        String name = line.substring(0, colon);
+        String value = trimmed(line.substring(colon + 1));
+        name.toLowerCase();
+        if (name == "content-length") resp.length = value.toInt();
+        else if (name == "x-version") resp.version = value;
+        else if (name == "x-sha256") resp.sha256 = value;
+        else if (name == "x-fw-sig") resp.fwSig = value;
+      }
+    }
+    line = "";
   }
+}
+
+// Pošle pomocníkovi na PC příkaz ("status", "sleep", "shutdown", "fwinfo") a počká na odpověď.
+HelperResult callPcHelper(const char *action, uint32_t timeoutMs = HELPER_RESPONSE_TIMEOUT_MS,
+                          HelperResponse *out = nullptr) {
+  if (!clockValid()) return HELPER_NO_CLOCK;
+  if (!pcIpKnown()) return HELPER_UNREACHABLE;  // IP se ještě nenašla
+  WiFiClient client;
+  HelperResponse resp;
+  helperOpen(client, action, String((long)time(nullptr)), timeoutMs, resp);
   client.stop();
   watchdogFeed();
-
-  int code = statusLine.startsWith("HTTP/") ? statusLine.substring(9, 12).toInt() : 0;
-  Serial.printf("[Pomocník] %s -> %d\n", action, code);
-  if (code == 200) return HELPER_OK;
-  if (code == 401) return HELPER_BAD_SECRET;
-  if (code == 0) return HELPER_UNREACHABLE;
-  return HELPER_ERROR;
+  Serial.printf("[Pomocník] %s -> %d\n", action, resp.code);
+  if (out) *out = resp;
+  return codeToResult(resp.code);
 }
 
 // Lidsky čitelná chyba pomocníka.
@@ -704,6 +858,8 @@ String helperErrorText(HelperResult r) {
       return "⚠️ Pomocník na PC neodpovídá. Běží na PC úloha „WoL spinac helper“? (README → Uspání a vypnutí)";
     case HELPER_BAD_SECRET:
       return "⚠️ Pomocník na PC odmítl příkaz – nesedí heslo pomocníka, nebo má PC/ESP32 špatný čas.";
+    case HELPER_DISABLED:
+      return "⚠️ Tuhle funkci máš na PC vypnutou. Spusť na PC znovu windows-setup.ps1 a povol ji.";
     default:
       return "⚠️ Pomocník na PC vrátil chybu. Podrobnosti jsou v C:\\ProgramData\\WoLSpinac\\helper.log.";
   }
@@ -785,7 +941,8 @@ void cmdHelp(const String &chatId) {
       "/status – je PC zapnuté? + stav spínače\n";
   if (helperConfigured()) {
     text += "/sleep – uspí PC (s potvrzením)\n"
-            "/shutdown – vypne PC (s potvrzením)\n";
+            "/shutdown – vypne PC (s potvrzením)\n"
+            "/update – nahraje nejnovější firmware přes PC (s potvrzením)\n";
   }
   text += "/notify – zapne/vypne oznámení, když se PC zapne nebo vypne\n"
           "/help – tento seznam";
@@ -859,18 +1016,25 @@ void askConfirm(const String &chatId, const String &action) {
     bot.sendMessage(chatId, "Uspání a vypnutí není nastavené (v nastavení chybí heslo pomocníka a pomocník na PC).", "");
     return;
   }
-  bool sleep = action == "sleep";
+  String question, yesLabel;
+  if (action == "sleep") {
+    question = "😴 Opravdu uspat PC?";
+    yesLabel = "✅ Ano, uspat";
+  } else if (action == "shutdown") {
+    question = "⏻ Opravdu vypnout PC?\nNeuložená práce na PC se ztratí.";
+    yesLabel = "✅ Ano, vypnout";
+  } else {
+    question = "🔄 Je venku verze " + updateVersion + " (teď máš " + FW_VERSION +
+               "). Aktualizovat?\nSpínač se pak na chvíli restartuje.";
+    yesLabel = "✅ Ano, aktualizovat";
+  }
   confirmAction = action;
   confirmNonce = esp_random();
   confirmStartMs = millis();
   String yes = action + "!" + String(confirmNonce);
-  String keyboard = String("[[{\"text\":\"") + (sleep ? "✅ Ano, uspat" : "✅ Ano, vypnout") +
-                    "\",\"callback_data\":\"" + yes + "\"},"
+  String keyboard = "[[{\"text\":\"" + yesLabel + "\",\"callback_data\":\"" + yes + "\"},"
                     "{\"text\":\"❌ Zrušit\",\"callback_data\":\"cancel\"}]]";
-  bot.sendMessageWithInlineKeyboard(chatId,
-                                    sleep ? "😴 Opravdu uspat PC?"
-                                          : "⏻ Opravdu vypnout PC?\nNeuložená práce na PC se ztratí.",
-                                    "", keyboard);
+  bot.sendMessageWithInlineKeyboard(chatId, question, "", keyboard);
 }
 
 // Uspání/vypnutí – druhý krok: uživatel klikl na "Ano".
@@ -898,6 +1062,152 @@ void doPowerAction(const String &chatId, const String &action, int messageId) {
   lastPcPingMs = pendingStartMs;
 }
 
+// Je verze a ("1.3.0") novější než b? Porovnává čísla, ne text.
+bool versionNewer(const String &a, const String &b) {
+  int pa[3] = {0, 0, 0}, pb[3] = {0, 0, 0};
+  sscanf(a.c_str(), "%d.%d.%d", &pa[0], &pa[1], &pa[2]);
+  sscanf(b.c_str(), "%d.%d.%d", &pb[0], &pb[1], &pb[2]);
+  for (int i = 0; i < 3; i++) {
+    if (pa[i] != pb[i]) return pa[i] > pb[i];
+  }
+  return false;
+}
+
+// Zeptá se pomocníka na nejnovější verzi. Vrací HELPER_OK a verzi v "version".
+HelperResult fetchLatestVersion(String &version) {
+  HelperResponse resp;
+  HelperResult r = callPcHelper("fwinfo", HELPER_DOWNLOAD_TIMEOUT_MS, &resp);
+  if (r == HELPER_OK && resp.version.length() == 0) r = HELPER_ERROR;
+  if (r == HELPER_OK) version = resp.version;
+  return r;
+}
+
+// Aktualizace – první krok: zeptá se pomocníka na PC na nejnovější verzi.
+void cmdUpdate(const String &chatId) {
+  if (!helperConfigured()) {
+    bot.sendMessage(chatId, "Aktualizace jdou přes pomocníka na PC – v nastavení chybí jeho heslo.", "");
+    return;
+  }
+  if (!isPcOnline()) {
+    sendWithMenu(chatId, "🔴 Aktualizaci stahuje pomocník na PC – nejdřív PC zapni (⚡ Probudit).");
+    return;
+  }
+  bot.sendMessage(chatId, "🔎 Zjišťuji nejnovější verzi…", "");
+  String latest;
+  HelperResult r = fetchLatestVersion(latest);
+  if (r != HELPER_OK) {
+    sendWithMenu(chatId, helperErrorText(r));
+    return;
+  }
+  if (!versionNewer(latest, FW_VERSION)) {
+    sendWithMenu(chatId, "✅ Máš nejnovější verzi " + String(FW_VERSION) + ".");
+    return;
+  }
+  updateVersion = latest;
+  askConfirm(chatId, "update");
+}
+
+// Přijme firmware od pomocníka, ověří ho a nahraje. Vrací "" při úspěchu, jinak popis chyby.
+String flashFromHelper(WiFiClient &client, const HelperResponse &resp, const String &timestamp) {
+  if (resp.code != 200) return helperErrorText(codeToResult(resp.code));
+  if (resp.length <= 0 || resp.sha256.length() != 64) return "pomocník neposlal firmware.";
+  // Podpis váže otisk firmwaru k našemu požadavku – soubor podstrčený někým jiným v síti neprojde.
+  if (!resp.fwSig.equalsIgnoreCase(hmacSha256Hex("fw:" + resp.sha256 + ":" + timestamp))) {
+    return "nesedí podpis firmwaru.";
+  }
+  if (!Update.begin(resp.length)) return "na nový firmware není místo.";
+
+  mbedtls_sha256_context sha;
+  mbedtls_sha256_init(&sha);
+  mbedtls_sha256_starts(&sha, 0);
+  uint8_t buf[1024];
+  long received = 0;
+  uint32_t lastDataMs = millis();
+  ledStartBlinking(100);
+  while (received < resp.length && millis() - lastDataMs < FIRMWARE_STALL_TIMEOUT_MS) {
+    if (client.available() <= 0) {
+      if (!client.connected()) break;
+      delay(5);
+      watchdogFeed();
+      continue;
+    }
+    int n = client.read(buf, (size_t)min((long)sizeof(buf), resp.length - received));
+    if (n <= 0) continue;
+    mbedtls_sha256_update(&sha, buf, n);
+    if (Update.write(buf, n) != (size_t)n) break;
+    received += n;
+    lastDataMs = millis();
+    watchdogFeed();
+  }
+  ledStopBlinking();
+  uint8_t digest[32];
+  mbedtls_sha256_finish(&sha, digest);
+  mbedtls_sha256_free(&sha);
+  char hex[65];
+  for (int i = 0; i < 32; i++) sprintf(hex + i * 2, "%02x", digest[i]);
+
+  if (received != resp.length) {
+    Update.abort();
+    return "přenos se přerušil.";
+  }
+  if (!resp.sha256.equalsIgnoreCase(hex)) {
+    Update.abort();
+    return "stažený soubor je poškozený.";
+  }
+  if (!Update.end(true)) return "firmware se nepodařilo dokončit (chyba " + String(Update.getError()) + ").";
+  return "";
+}
+
+// Aktualizace – druhý krok: uživatel klikl na "Ano". Firmware stáhne pomocník
+// na PC z GitHubu a pošle ho sem po domácí síti.
+void doUpdate(const String &chatId, int messageId) {
+  confirmAction = "";
+  bot.sendMessage(chatId, "⬇️ Stahuji verzi " + updateVersion + " přes PC…", "", messageId);
+  watchdogFeed();
+  if (!clockValid() || !pcIpKnown()) {
+    sendWithMenu(chatId, helperErrorText(clockValid() ? HELPER_UNREACHABLE : HELPER_NO_CLOCK));
+    return;
+  }
+  String timestamp = String((long)time(nullptr));
+  WiFiClient client;
+  HelperResponse resp;
+  helperOpen(client, "firmware", timestamp, HELPER_DOWNLOAD_TIMEOUT_MS, resp);
+  String error = flashFromHelper(client, resp, timestamp);
+  client.stop();
+  if (error.length() > 0) {
+    Serial.printf("[Aktualizace] Chyba: %s\n", error.c_str());
+    sendWithMenu(chatId, "❌ Aktualizace se nepovedla: " + error + "\nSpínač běží dál na verzi " + FW_VERSION + ".");
+    return;
+  }
+  Serial.println(F("[Aktualizace] Hotovo, restartuji."));
+  bot.sendMessage(chatId, "✅ Nahráno. Restartuji – za chvíli napíšu „WoL spínač online“.", "");
+  delay(1000);
+  ESP.restart();
+}
+
+// Volá se z loop(): občas zjistí, jestli je venku nová verze, a napíše o ní (každou verzi jen jednou).
+void checkForUpdate() {
+  uint32_t now = millis();
+  if ((int32_t)(now - nextUpdateCheckMs) < 0) return;
+  nextUpdateCheckMs = now + UPDATE_RETRY_INTERVAL_MS;
+  if (!helperConfigured() || pcState != PC_ON || pending != PENDING_NONE) return;
+
+  String latest;
+  HelperResult r = fetchLatestVersion(latest);
+  if (r == HELPER_DISABLED) {  // aktualizace na PC nepovolené – už se neptáme
+    nextUpdateCheckMs = now + UPDATE_CHECK_INTERVAL_MS * 4;
+    return;
+  }
+  if (r != HELPER_OK) return;  // zkusíme to za 30 minut
+  nextUpdateCheckMs = now + UPDATE_CHECK_INTERVAL_MS;
+  if (!versionNewer(latest, FW_VERSION) || prefs.getString("upd_seen", "") == latest) return;
+
+  prefs.putString("upd_seen", latest);
+  Serial.printf("[Aktualizace] Nová verze %s.\n", latest.c_str());
+  notifyAllowedUsers("🔄 Je venku nová verze spínače: " + latest + " (teď máš " + FW_VERSION +
+                     ").\nKlikni na „Aktualizace“, nebo napiš /update.");
+}
+
 void cmdNotify(const String &chatId) {
   notifyEnabled = !notifyEnabled;
   prefs.putBool("notify", notifyEnabled);
@@ -914,18 +1224,21 @@ void handleButton(const telegramMessage &msg) {
   if (data == "wake") cmdWake(msg.chat_id);
   else if (data == "status") cmdStatus(msg.chat_id);
   else if (data == "notify") cmdNotify(msg.chat_id);
+  else if (data == "update") cmdUpdate(msg.chat_id);
   else if (data == "sleep" || data == "shutdown") askConfirm(msg.chat_id, data);
   else if (data == "cancel") {
     confirmAction = "";
     bot.sendMessage(msg.chat_id, "Zrušeno.", "", msg.message_id);
   } else {
-    // Potvrzení "sleep!<číslo>" / "shutdown!<číslo>" – platí jen poslední a jen 2 minuty.
+    // Potvrzení "sleep!<číslo>" / "shutdown!<číslo>" / "update!<číslo>" – platí jen poslední a jen 2 minuty.
     int bang = data.indexOf('!');
     String action = bang > 0 ? data.substring(0, bang) : "";
     bool valid = action.length() > 0 && action == confirmAction &&
                  data.substring(bang + 1) == String(confirmNonce) &&
                  millis() - confirmStartMs < CONFIRM_VALID_MS;
-    if (valid) {
+    if (valid && action == "update") {
+      doUpdate(msg.chat_id, msg.message_id);
+    } else if (valid) {
       doPowerAction(msg.chat_id, action, msg.message_id);
     } else {
       bot.sendMessage(msg.chat_id, "⌛ Tohle potvrzení už neplatí, zkus to znovu.", "", msg.message_id);
@@ -966,6 +1279,7 @@ void handleMessage(const telegramMessage &msg) {
   else if (command == "/sleep") askConfirm(msg.chat_id, "sleep");
   else if (command == "/shutdown") askConfirm(msg.chat_id, "shutdown");
   else if (command == "/notify") cmdNotify(msg.chat_id);
+  else if (command == "/update") cmdUpdate(msg.chat_id);
   else if (command == "/help" || command == "/start") cmdHelp(msg.chat_id);
   else sendWithMenu(msg.chat_id, "Tomuhle nerozumím 🙂 Klikni na tlačítko, nebo napiš /help.");
 }
@@ -1004,7 +1318,8 @@ void registerBotCommands() {
                       "{\"command\":\"status\",\"description\":\"Je PC zapnuté?\"},");
   if (helperConfigured()) {
     commands += F("{\"command\":\"sleep\",\"description\":\"Uspat PC\"},"
-                  "{\"command\":\"shutdown\",\"description\":\"Vypnout PC\"},");
+                  "{\"command\":\"shutdown\",\"description\":\"Vypnout PC\"},"
+                  "{\"command\":\"update\",\"description\":\"Aktualizovat firmware\"},");
   }
   commands += F("{\"command\":\"notify\",\"description\":\"Oznámení zap/vyp\"},"
                 "{\"command\":\"help\",\"description\":\"Seznam příkazů\"}]");
@@ -1029,7 +1344,7 @@ void setup() {
   loadConfig();
 
   connectWifi();  // otevře portál, když chybí Wi-Fi nebo nastavení; po návratu je cfg platné
-  pcIp.fromString(cfg.pcIp);
+  if (cfg.pcIp.length() > 0) pcIp.fromString(cfg.pcIp);
   allowedChats = parseChatIds(cfg.chatIds);
   bot.updateToken(cfg.botToken);
   watchdogStart();
@@ -1050,6 +1365,7 @@ void setup() {
   notifyAllowedUsers("✅ WoL spínač online\nPC je " + pcText + "\nWi-Fi signál: " + formatWifiSignal());
   Serial.println(F("=== Připraveno, čekám na příkazy ==="));
   lastTelegramCheckMs = millis();
+  nextUpdateCheckMs = millis() + UPDATE_FIRST_CHECK_MS;
 }
 
 void loop() {
@@ -1069,6 +1385,7 @@ void loop() {
   }
 
   monitorPc();
+  checkForUpdate();
 
   now = millis();
   if (now - lastTelegramCheckMs >= TELEGRAM_CHECK_INTERVAL_MS) {

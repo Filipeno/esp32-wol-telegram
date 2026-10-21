@@ -10,7 +10,8 @@
 #  2. zapne probouzeni po siti (Magic Packet) a vypne usporu u sitovky
 #  3. vypne Rychle spusteni Windows
 #  4. povoli prichozi ping z mistni site (ESP32 podle nej pozna, jestli PC bezi)
-#  5. volitelne nainstaluje pomocnika pro uspani/vypnuti z Telegramu a vypise jeho heslo
+#  5. volitelne nainstaluje pomocnika (uspani/vypnuti z Telegramu, aktualizace firmwaru) a vypise jeho heslo
+# Na zacatku se zepta, jestli rovnou odsouhlasit vsechno, nebo se ptat u kazdeho kroku.
 # BIOS a router ti skript neudela - na konci vypise, co zbyva.
 
 $ErrorActionPreference = "Stop"
@@ -23,7 +24,14 @@ if (-not $isAdmin) {
     return
 }
 
+Write-Host ""
+Write-Host "Jak chces postupovat?"
+Write-Host "  [V] Vsechno - nastavit a nainstalovat vsechno bez dalsich otazek"
+Write-Host "  [P] Ptat se u kazdeho kroku zvlast"
+$YesToAll = (Read-Host "Volba [V/p]") -notmatch '^[pPnN]'
+
 function Ask([string]$question) {
+    if ($YesToAll) { Write-Host "$question -> ano"; return $true }
     $a = Read-Host "$question [A/n]"
     return ($a -eq "" -or $a -match '^[aAyY]')
 }
@@ -76,7 +84,11 @@ if (-not (Get-NetFirewallRule -DisplayName "WoL spinac - ping" -ErrorAction Sile
 
 # --- 5. Pomocnik (uspani/vypnuti) ---
 $secret = ""
-if (Ask "Chces PC z Telegramu take USPAT a VYPNOUT? (nainstaluje malou sluzbu na PC)") {
+$features = @()
+if (Ask "Chces PC z Telegramu take USPAT a VYPNOUT?") { $features += "power" }
+if (Ask "Chces aktualizovat firmware ESP32 z Telegramu? (nova verze se stahne pres tohle PC)") { $features += "update" }
+if ($features.Count -gt 0) {
+    Write-Host "Instaluji pomocnika na PC ($($features -join ', '))..."
     $bytes = New-Object byte[] 32; [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes); $secret = -join ($bytes | ForEach-Object { $_.ToString('x2') })
     $dir = Join-Path ([IO.Path]::GetTempPath()) ("wol-helper-" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $dir | Out-Null
@@ -85,19 +97,19 @@ if (Ask "Chces PC z Telegramu take USPAT a VYPNOUT? (nainstaluje malou sluzbu na
         if ($local -and (Test-Path (Join-Path $local $f))) { Copy-Item (Join-Path $local $f) $dir }
         else { Invoke-WebRequest "$Repo/pc-helper/$f" -OutFile (Join-Path $dir $f) -UseBasicParsing }
     }
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dir "install.ps1") -Secret $secret
-    if ($LASTEXITCODE -ne 0) { $secret = ""; Write-Host "Pomocnika se nepodarilo nainstalovat, uspani/vypnuti nebude fungovat." -ForegroundColor Red }
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dir "install.ps1") -Secret $secret -Features ($features -join " ")
+    if ($LASTEXITCODE -ne 0) { $secret = ""; Write-Host "Pomocnika se nepodarilo nainstalovat, uspani/vypnuti ani aktualizace nebudou fungovat." -ForegroundColor Red }
 }
 
 # --- Shrnuti ---
 Write-Host ""
 Write-Host "================ Udaje pro nastavovaci stranku ESP32 ================" -ForegroundColor Green
 Write-Host "  MAC adresa PC:  $mac"
-Write-Host "  IP adresa PC:   $ip"
+Write-Host "  IP adresa PC:   $ip   (nepovinne - kdyz pole nechas prazdne, spinac PC najde podle MAC)"
 if ($secret) { Write-Host "  Heslo pomocnika: $secret" }
 Write-Host "====================================================================="
 Write-Host ""
 Write-Host "Co zbyva udelat rucne:"
-Write-Host "  - V routeru nastav DHCP rezervaci IP $ip pro MAC $mac (aby se IP nemenila)."
+Write-Host "  - (Nepovinne) V routeru nastav DHCP rezervaci IP $ip pro MAC $mac."
 Write-Host "  - V BIOSu zapni probouzeni po siti (Wake on LAN / PCI-E wake) a vypni ErP / Deep Sleep."
 Write-Host "  - Nahraj firmware: https://filipeno.github.io/esp32-wol-telegram/"
