@@ -77,7 +77,7 @@ if (-not (Get-NetFirewallRule -DisplayName "WoL spinac - ping" -ErrorAction Sile
 # --- 5. Pomocnik (uspani/vypnuti) ---
 $secret = ""
 if (Ask "Chces PC z Telegramu take USPAT a VYPNOUT? (nainstaluje malou sluzbu na PC)") {
-    $secret = -join ((1..32) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
+    $bytes = New-Object byte[] 32; [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes); $secret = -join ($bytes | ForEach-Object { $_.ToString('x2') })
     $dir = Join-Path ([IO.Path]::GetTempPath()) ("wol-helper-" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $dir | Out-Null
     $local = if ($PSScriptRoot) { Join-Path $PSScriptRoot "..\pc-helper" } else { "" }
