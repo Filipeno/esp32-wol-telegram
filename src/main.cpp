@@ -61,7 +61,7 @@
 #define PC_HELPER_PORT 8766
 #endif
 
-static const char *FW_VERSION = "1.2.2";
+static const char *FW_VERSION = "1.2.3";
 
 // ---------------------------------------------------------------------
 //  Nastavení (běžně není třeba měnit)
@@ -437,13 +437,13 @@ void connectWifi() {
       "Token a chat ID viz návod (Telegram), MAC a IP vypíše <code>windows-setup.ps1</code>.</p>");
   // Tajná pole se neukazují (ochrana před zablesknutím v portálu); necháváme je prázdná.
   // Když uživatel vyplní nový, použije se; když nevyplní, zůstane starý.
-  WiFiManagerParameter pToken("token", "* Token bota z @BotFather", "", 90);
-  WiFiManagerParameter pChats("chats", "* Chat ID (víc lidí odděl čárkou)", cfg.chatIds.c_str(), 80);
-  WiFiManagerParameter pMac("mac", "* MAC adresa PC (kabelová síťovka)", cfg.pcMac.c_str(), 20);
-  WiFiManagerParameter pIp("ip", "* IP adresa PC v domácí síti", cfg.pcIp.c_str(), 16);
-  WiFiManagerParameter pHelper("hsec", "Heslo pomocníka na PC (uspání/vypnutí, nepovinné)",
+  WiFiManagerParameter pToken("wol_token", "* Token bota z @BotFather", "", 90);
+  WiFiManagerParameter pChats("wol_chats", "* Chat ID (víc lidí odděl čárkou)", cfg.chatIds.c_str(), 80);
+  WiFiManagerParameter pMac("wol_mac", "* MAC adresa PC (kabelová síťovka)", cfg.pcMac.c_str(), 20);
+  WiFiManagerParameter pIp("wol_pcip", "* IP adresa PC v domácí síti", cfg.pcIp.c_str(), 16);
+  WiFiManagerParameter pHelper("wol_hsec", "Heslo pomocníka na PC (uspání/vypnutí, nepovinné)",
                                "", 64);
-  WiFiManagerParameter pOta("ota", "Heslo pro nahrávání firmwaru přes Wi-Fi (nepovinné)",
+  WiFiManagerParameter pOta("wol_ota", "Heslo pro nahrávání firmwaru přes Wi-Fi (nepovinné)",
                             "", 64);
   wm.addParameter(&intro);
   wm.addParameter(&pToken);
