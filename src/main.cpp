@@ -66,7 +66,7 @@
 #define PC_HELPER_PORT 8766
 #endif
 
-static const char *FW_VERSION = "1.3.1";
+static const char *FW_VERSION = "1.3.2";
 
 // ---------------------------------------------------------------------
 //  Nastavení (běžně není třeba měnit)
@@ -963,6 +963,7 @@ void cmdStatus(const String &chatId) {
     text += r == HELPER_OK ? "\n🧩 Pomocník na PC: běží (uspání/vypnutí funguje)"
                            : "\n" + helperErrorText(r);
   }
+  if (pcIpKnown()) text += "\n💻 PC: " + pcIp.toString() + (cfg.pcIp.length() ? "" : " (nalezeno podle MAC)");
   text += "\n\n🔔 Oznámení: " + String(notifyEnabled ? "zapnutá" : "vypnutá");
   text += "\n⏱️ Spínač běží: " + formatUptime();
   text += "\n📶 Wi-Fi signál: " + formatWifiSignal();
