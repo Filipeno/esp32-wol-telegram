@@ -430,14 +430,16 @@ void connectWifi() {
   WiFiManagerParameter intro(
       "<p><b>Údaje pro WoL spínač.</b> Pole s * jsou povinná. "
       "Token a chat ID viz návod (Telegram), MAC a IP vypíše <code>windows-setup.ps1</code>.</p>");
-  WiFiManagerParameter pToken("token", "* Token bota z @BotFather", cfg.botToken.c_str(), 90);
+  // Tajná pole se neukazují (ochrana před zablesknutím v portálu); necháváme je prázdná.
+  // Když uživatel vyplní nový, použije se; když nevyplní, zůstane starý.
+  WiFiManagerParameter pToken("token", "* Token bota z @BotFather", "", 90);
   WiFiManagerParameter pChats("chats", "* Chat ID (víc lidí odděl čárkou)", cfg.chatIds.c_str(), 80);
   WiFiManagerParameter pMac("mac", "* MAC adresa PC (kabelová síťovka)", cfg.pcMac.c_str(), 20);
   WiFiManagerParameter pIp("ip", "* IP adresa PC v domácí síti", cfg.pcIp.c_str(), 16);
   WiFiManagerParameter pHelper("hsec", "Heslo pomocníka na PC (uspání/vypnutí, nepovinné)",
-                               cfg.helperSecret.c_str(), 64);
+                               "", 64);
   WiFiManagerParameter pOta("ota", "Heslo pro nahrávání firmwaru přes Wi-Fi (nepovinné)",
-                            cfg.otaPassword.c_str(), 64);
+                            "", 64);
   wm.addParameter(&intro);
   wm.addParameter(&pToken);
   wm.addParameter(&pChats);
@@ -463,15 +465,19 @@ void connectWifi() {
     ESP.restart();
   }
 
-  // Hodnoty z portálu (když se portál neotevřel, jsou stejné jako dosavadní).
+  // Hodnoty z portálu. Tajná pole přicházejí prázdná, takže když uživatel
+  // nic nevyplní, zůstane stará hodnota.
   Config entered;
-  entered.botToken = trimmed(pToken.getValue());
+  String token = trimmed(pToken.getValue());
+  entered.botToken = token.length() ? token : cfg.botToken;
   entered.chatIds = joinChatIds(parseChatIds(pChats.getValue()));
   String mac = normalizeMac(pMac.getValue());
   entered.pcMac = mac.length() ? mac : trimmed(pMac.getValue());
   entered.pcIp = trimmed(pIp.getValue());
-  entered.helperSecret = trimmed(pHelper.getValue());
-  entered.otaPassword = trimmed(pOta.getValue());
+  String hsec = trimmed(pHelper.getValue());
+  entered.helperSecret = hsec.length() ? hsec : cfg.helperSecret;
+  String ota = trimmed(pOta.getValue());
+  entered.otaPassword = ota.length() ? ota : cfg.otaPassword;
   bool changed = entered.botToken != cfg.botToken || entered.chatIds != cfg.chatIds ||
                  entered.pcMac != cfg.pcMac || entered.pcIp != cfg.pcIp ||
                  entered.helperSecret != cfg.helperSecret || entered.otaPassword != cfg.otaPassword;
