@@ -61,7 +61,7 @@
 #define PC_HELPER_PORT 8766
 #endif
 
-static const char *FW_VERSION = "1.2.1";
+static const char *FW_VERSION = "1.2.2";
 
 // ---------------------------------------------------------------------
 //  Nastavení (běžně není třeba měnit)
@@ -454,6 +454,11 @@ void connectWifi() {
   wm.addParameter(&pOta);
 
   ledStartBlinking(250);  // pomalé blikání = připojuji se
+  // Nastavovací Wi-Fi otevřená = LED svítí trvale (blikání by se pletlo s připojováním).
+  wm.setAPCallback([](WiFiManager *) {
+    ledBlinker.detach();
+    digitalWrite(LED_PIN, HIGH);
+  });
   wm.setConnectTimeout(WIFI_CONNECT_TIMEOUT_S);
   wm.setConfigPortalTimeout(PORTAL_TIMEOUT_S);
   wm.setTitle("WoL spínač");
@@ -497,7 +502,7 @@ void connectWifi() {
     ESP.restart();
   }
 
-  ledStopBlinking();
+  ledStopBlinking();  // LED zhasne = Wi-Fi připojená a nastavení hotové
   WiFi.setAutoReconnect(true);
   Serial.printf("[WiFi] Připojeno k \"%s\", IP %s, signál %s\n", WiFi.SSID().c_str(),
                 WiFi.localIP().toString().c_str(), formatWifiSignal().c_str());
