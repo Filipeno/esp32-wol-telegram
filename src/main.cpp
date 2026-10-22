@@ -66,7 +66,7 @@
 #define PC_HELPER_PORT 8766
 #endif
 
-static const char *FW_VERSION = "1.3.2";
+static const char *FW_VERSION = "1.4.0";
 
 // ---------------------------------------------------------------------
 //  Nastavení (běžně není třeba měnit)
@@ -124,6 +124,10 @@ static const uint32_t UPDATE_CHECK_INTERVAL_MS = 6UL * 60UL * 60UL * 1000UL;
 static const uint32_t UPDATE_RETRY_INTERVAL_MS = 30UL * 60UL * 1000UL;  // PC bylo vypnuté / chyba
 // Aktualizace: přenos se vzdá, když 15 s nepřijdou žádná data.
 static const uint32_t FIRMWARE_STALL_TIMEOUT_MS = 15UL * 1000UL;
+
+// Nastavení za běhu: podržením tlačítka BOOT na 3 s se otevře nastavovací Wi-Fi.
+static const uint32_t BOOT_HOLD_MS = 3000;
+static const uint32_t RUNTIME_PORTAL_TIMEOUT_S = 300;
 
 // Výpadek Wi-Fi: každých 15 s zkusit znovu připojit, po 10 minutách restart.
 static const uint32_t WIFI_RETRY_INTERVAL_MS = 15UL * 1000UL;
@@ -526,6 +530,53 @@ void saveConfig() {
   prefs.putString("ota", cfg.otaPassword);
 }
 
+// Pole nastavovací stránky (stejná při prvním nastavení i při otevření za běhu).
+// Tajná pole se neukazují (ochrana před zablesknutím v portálu); zůstávají prázdná.
+// Když uživatel vyplní nová, použijí se; když ne, zůstanou stará.
+struct PortalFields {
+  WiFiManagerParameter intro{
+      "<p><b>Údaje pro WoL spínač.</b> Pole s * jsou povinná. "
+      "Token a chat ID viz návod (Telegram), MAC vypíše <code>windows-setup.ps1</code>. IP můžeš nechat prázdnou.</p>"};
+  WiFiManagerParameter token{"wol_token", "* Token bota z @BotFather (prázdné = nechat dosavadní)", "", 90};
+  WiFiManagerParameter chats{"wol_chats", "* Chat ID (víc lidí odděl čárkou)", cfg.chatIds.c_str(), 80};
+  WiFiManagerParameter mac{"wol_mac", "* MAC adresa PC (kabelová síťovka)", cfg.pcMac.c_str(), 20};
+  WiFiManagerParameter ip{"wol_pcip", "IP adresa PC (nepovinné: když necháš prázdné, spínač PC najde podle MAC)",
+                          cfg.pcIp.c_str(), 16};
+  WiFiManagerParameter helper{"wol_hsec", "Heslo pomocníka na PC (uspání/vypnutí/aktualizace, prázdné = nechat dosavadní)", "", 64};
+  WiFiManagerParameter ota{"wol_ota", "Heslo pro nahrávání firmwaru přes Wi-Fi (prázdné = nechat dosavadní)", "", 64};
+
+  void addTo(WiFiManager &wm) {
+    wm.addParameter(&intro);
+    wm.addParameter(&token);
+    wm.addParameter(&chats);
+    wm.addParameter(&mac);
+    wm.addParameter(&ip);
+    wm.addParameter(&helper);
+    wm.addParameter(&ota);
+  }
+
+  // Zadané hodnoty; prázdná tajná pole nechají dosavadní hodnotu.
+  Config read() {
+    Config entered;
+    String t = trimmed(token.getValue());
+    entered.botToken = t.length() ? t : cfg.botToken;
+    entered.chatIds = joinChatIds(parseChatIds(chats.getValue()));
+    String m = normalizeMac(mac.getValue());
+    entered.pcMac = m.length() ? m : trimmed(mac.getValue());
+    entered.pcIp = trimmed(ip.getValue());
+    String h = trimmed(helper.getValue());
+    entered.helperSecret = h.length() ? h : cfg.helperSecret;
+    String o = trimmed(ota.getValue());
+    entered.otaPassword = o.length() ? o : cfg.otaPassword;
+    return entered;
+  }
+};
+
+bool sameConfig(const Config &a, const Config &b) {
+  return a.botToken == b.botToken && a.chatIds == b.chatIds && a.pcMac == b.pcMac && a.pcIp == b.pcIp &&
+         a.helperSecret == b.helperSecret && a.otaPassword == b.otaPassword;
+}
+
 // Připojení k Wi-Fi přes WiFiManager. Pokud uložená Wi-Fi nefunguje nebo
 // chybí nastavení, ESP32 vytvoří vlastní Wi-Fi "WoL-Spinac" s nastavovací
 // stránkou (captive portal): Wi-Fi + token, chat ID, MAC a IP PC, hesla.
@@ -543,26 +594,8 @@ void connectWifi() {
     wm.resetSettings();
   }
 
-  WiFiManagerParameter intro(
-      "<p><b>Údaje pro WoL spínač.</b> Pole s * jsou povinná. "
-      "Token a chat ID viz návod (Telegram), MAC vypíše <code>windows-setup.ps1</code>. IP můžeš nechat prázdnou.</p>");
-  // Tajná pole se neukazují (ochrana před zablesknutím v portálu); necháváme je prázdná.
-  // Když uživatel vyplní nový, použije se; když nevyplní, zůstane starý.
-  WiFiManagerParameter pToken("wol_token", "* Token bota z @BotFather", "", 90);
-  WiFiManagerParameter pChats("wol_chats", "* Chat ID (víc lidí odděl čárkou)", cfg.chatIds.c_str(), 80);
-  WiFiManagerParameter pMac("wol_mac", "* MAC adresa PC (kabelová síťovka)", cfg.pcMac.c_str(), 20);
-  WiFiManagerParameter pIp("wol_pcip", "IP adresa PC (nepovinné: když necháš prázdné, spínač PC najde podle MAC)", cfg.pcIp.c_str(), 16);
-  WiFiManagerParameter pHelper("wol_hsec", "Heslo pomocníka na PC (uspání/vypnutí, nepovinné)",
-                               "", 64);
-  WiFiManagerParameter pOta("wol_ota", "Heslo pro nahrávání firmwaru přes Wi-Fi (nepovinné)",
-                            "", 64);
-  wm.addParameter(&intro);
-  wm.addParameter(&pToken);
-  wm.addParameter(&pChats);
-  wm.addParameter(&pMac);
-  wm.addParameter(&pIp);
-  wm.addParameter(&pHelper);
-  wm.addParameter(&pOta);
+  PortalFields fields;
+  fields.addTo(wm);
 
   ledStartBlinking(250);  // pomalé blikání = připojuji se
   // Nastavovací Wi-Fi otevřená = LED svítí trvale (blikání by se pletlo s připojováním).
@@ -586,23 +619,8 @@ void connectWifi() {
     ESP.restart();
   }
 
-  // Hodnoty z portálu. Tajná pole přicházejí prázdná, takže když uživatel
-  // nic nevyplní, zůstane stará hodnota.
-  Config entered;
-  String token = trimmed(pToken.getValue());
-  entered.botToken = token.length() ? token : cfg.botToken;
-  entered.chatIds = joinChatIds(parseChatIds(pChats.getValue()));
-  String mac = normalizeMac(pMac.getValue());
-  entered.pcMac = mac.length() ? mac : trimmed(pMac.getValue());
-  entered.pcIp = trimmed(pIp.getValue());
-  String hsec = trimmed(pHelper.getValue());
-  entered.helperSecret = hsec.length() ? hsec : cfg.helperSecret;
-  String ota = trimmed(pOta.getValue());
-  entered.otaPassword = ota.length() ? ota : cfg.otaPassword;
-  bool changed = entered.botToken != cfg.botToken || entered.chatIds != cfg.chatIds ||
-                 entered.pcMac != cfg.pcMac || entered.pcIp != cfg.pcIp ||
-                 entered.helperSecret != cfg.helperSecret || entered.otaPassword != cfg.otaPassword;
-  if (changed) {
+  Config entered = fields.read();
+  if (!sameConfig(entered, cfg)) {
     cfg = entered;
     saveConfig();
     Serial.println(F("[Nastavení] Uloženo."));
@@ -617,6 +635,208 @@ void connectWifi() {
   WiFi.setAutoReconnect(true);
   Serial.printf("[WiFi] Připojeno k \"%s\", IP %s, signál %s\n", WiFi.SSID().c_str(),
                 WiFi.localIP().toString().c_str(), formatWifiSignal().c_str());
+}
+
+// ---------------------------------------------------------------------
+//  Nastavení za běhu: tlačítko BOOT a sériová konzole (scripts/wolctl.py)
+// ---------------------------------------------------------------------
+
+WiFiManager *runtimeWm = nullptr;
+PortalFields *runtimeFields = nullptr;
+bool runtimeSaved = false;
+uint32_t bootPressedSinceMs = 0;
+bool bootArmed = false;  // tlačítko muselo být od startu aspoň jednou uvolněné
+
+bool portalOpen() {
+  return runtimeWm != nullptr;
+}
+
+// Otevře nastavovací Wi-Fi "WoL-Spinac" (bez restartu; Wi-Fi zůstává připojená).
+void openRuntimePortal() {
+  if (portalOpen()) return;
+  Serial.println(F("[Nastavení] Otevírám nastavovací Wi-Fi \"WoL-Spinac\"."));
+  runtimeSaved = false;
+  runtimeWm = new WiFiManager();
+  runtimeFields = new PortalFields();
+  runtimeFields->addTo(*runtimeWm);
+  static std::vector<const char *> menu = {"param", "wifi", "exit"};
+  runtimeWm->setMenu(menu);
+  runtimeWm->setTitle("WoL spínač – nastavení");
+  runtimeWm->setConfigPortalBlocking(false);
+  runtimeWm->setConfigPortalTimeout(RUNTIME_PORTAL_TIMEOUT_S);
+  runtimeWm->setSaveParamsCallback([]() { runtimeSaved = true; });
+  runtimeWm->setSaveConfigCallback([]() { runtimeSaved = true; });
+  runtimeWm->startConfigPortal(PORTAL_SSID, PORTAL_PASSWORD);
+  ledBlinker.detach();
+  digitalWrite(LED_PIN, HIGH);  // svítí = nastavovací Wi-Fi je otevřená
+}
+
+// Obsluha otevřeného portálu z loop(): uloží zadané hodnoty a restartuje.
+void handleRuntimePortal() {
+  runtimeWm->process();
+  if (runtimeSaved) {
+    Config entered = runtimeFields->read();
+    if (!sameConfig(entered, cfg)) {
+      Config old = cfg;
+      cfg = entered;
+      if (configComplete()) {
+        saveConfig();
+        Serial.println(F("[Nastavení] Uloženo, restartuji."));
+      } else {
+        cfg = old;
+        Serial.println(F("[Nastavení] Neplatné údaje (token, chat ID, MAC, IP) – neuloženo."));
+      }
+    }
+    delay(1500);
+    ESP.restart();
+  }
+  if (!runtimeWm->getConfigPortalActive()) {  // vypršel čas
+    Serial.println(F("[Nastavení] Nastavovací Wi-Fi zavřena, restartuji."));
+    delay(500);
+    ESP.restart();
+  }
+}
+
+// Podržení BOOT na 3 s za běhu otevře portál.
+void checkBootButton() {
+  uint32_t now = millis();
+  if (digitalRead(BOOT_BUTTON_PIN) != LOW) {
+    bootArmed = true;
+    bootPressedSinceMs = 0;
+    return;
+  }
+  if (!bootArmed || portalOpen()) return;
+  if (bootPressedSinceMs == 0) bootPressedSinceMs = now == 0 ? 1 : now;
+  if (now - bootPressedSinceMs >= BOOT_HOLD_MS) {
+    bootPressedSinceMs = 0;
+    openRuntimePortal();
+  }
+}
+
+// --- Sériová konzole: příkazy začínají "@", odpovědi taky ("@ok", "@err ...") ---
+
+Config staged;
+bool stagedActive = false;
+
+String maskSecret(const String &value, bool showStart) {
+  if (value.length() == 0) return "(prázdné)";
+  if (showStart && value.length() > 8) return value.substring(0, 6) + "…";
+  return "(nastaveno)";
+}
+
+// Nastaví jednu položku do rozpracované konfigurace. Vrací "" nebo popis chyby.
+String stageSetting(const String &key, const String &rawValue) {
+  String value = trimmed(rawValue);
+  if (!stagedActive) {
+    staged = cfg;
+    stagedActive = true;
+  }
+  if (key == "token") {
+    if (value.indexOf(':') < 1 || value.length() < 20) return "token vypadá špatně (čekám 123456:ABC…)";
+    staged.botToken = value;
+  } else if (key == "chats") {
+    std::vector<String> ids = parseChatIds(value);
+    if (ids.empty()) return "chat ID musí být čísla oddělená čárkou";
+    staged.chatIds = joinChatIds(ids);
+  } else if (key == "mac") {
+    String m = normalizeMac(value);
+    if (m.length() == 0) return "MAC musí mít 12 hex číslic";
+    staged.pcMac = m;
+  } else if (key == "ip") {
+    IPAddress tmp;
+    if (value.length() > 0 && !tmp.fromString(value)) return "neplatná IP adresa";
+    staged.pcIp = value;
+  } else if (key == "hsec") {
+    staged.helperSecret = value;
+  } else if (key == "ota") {
+    staged.otaPassword = value;
+  } else {
+    return "neznámá položka (token, chats, mac, ip, hsec, ota)";
+  }
+  return "";
+}
+
+void handleSerialCommand(String line) {
+  line.trim();
+  if (!line.startsWith("@")) return;
+  String cmd = line.substring(1);
+  String arg;
+  int space = cmd.indexOf(' ');
+  if (space > 0) {
+    arg = cmd.substring(space + 1);
+    cmd = cmd.substring(0, space);
+  }
+
+  if (cmd == "ping") {
+    Serial.printf("@pong %s\n", FW_VERSION);
+  } else if (cmd == "get") {
+    Config &c = stagedActive ? staged : cfg;
+    Serial.printf("@cfg token %s\n", maskSecret(c.botToken, true).c_str());
+    Serial.printf("@cfg chats %s\n", c.chatIds.c_str());
+    Serial.printf("@cfg mac %s\n", c.pcMac.c_str());
+    Serial.printf("@cfg ip %s\n", c.pcIp.length() ? c.pcIp.c_str() : "(prázdné = najde se podle MAC)");
+    Serial.printf("@cfg hsec %s\n", maskSecret(c.helperSecret, false).c_str());
+    Serial.printf("@cfg ota %s\n", maskSecret(c.otaPassword, false).c_str());
+    Serial.printf("@info version %s\n", FW_VERSION);
+    Serial.printf("@info wifi %s (%s)\n", WiFi.SSID().c_str(), formatWifiSignal().c_str());
+    Serial.printf("@info ip %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("@info pc %s\n", pcIpKnown() ? pcIp.toString().c_str() : "(zatím nenalezeno)");
+    Serial.printf("@info staged %s\n", stagedActive ? "ano (neuloženo)" : "ne");
+    Serial.println("@end");
+  } else if (cmd == "set") {
+    int sp = arg.indexOf(' ');
+    String error = sp > 0 ? stageSetting(arg.substring(0, sp), arg.substring(sp + 1)) : "použití: @set <položka> <hodnota>";
+    if (error.length() == 0) Serial.println("@ok");
+    else Serial.printf("@err %s\n", error.c_str());
+  } else if (cmd == "save") {
+    if (!stagedActive) {
+      Serial.println("@err nic ke uložení");
+      return;
+    }
+    Config old = cfg;
+    cfg = staged;
+    if (!configComplete()) {
+      cfg = old;
+      Serial.println("@err údaje jsou neúplné (token, chat ID a MAC jsou povinné)");
+      return;
+    }
+    saveConfig();
+    Serial.println("@ok uloženo, restartuji");
+    delay(500);
+    ESP.restart();
+  } else if (cmd == "discard") {
+    stagedActive = false;
+    Serial.println("@ok");
+  } else if (cmd == "portal") {
+    Serial.println("@ok");
+    openRuntimePortal();
+  } else if (cmd == "wifireset") {
+    Serial.println("@ok Wi-Fi smazána, restartuji do nastavovací Wi-Fi");
+    delay(300);
+    WiFiManager wm;
+    wm.resetSettings();
+    ESP.restart();
+  } else if (cmd == "reboot") {
+    Serial.println("@ok");
+    delay(300);
+    ESP.restart();
+  } else {
+    Serial.println("@err neznámý příkaz");
+  }
+}
+
+// Čte řádky ze sériové linky (USB) a předává je konzoli.
+void pollSerialConsole() {
+  static String buffer;
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+    if (c == '\n') {
+      handleSerialCommand(buffer);
+      buffer = "";
+    } else if (c != '\r' && buffer.length() < 300) {
+      buffer += c;
+    }
+  }
 }
 
 // Hlídá Wi-Fi v hlavní smyčce. Vrací true, když je Wi-Fi připojená.
@@ -1371,6 +1591,13 @@ void setup() {
 
 void loop() {
   watchdogFeed();
+  pollSerialConsole();
+  checkBootButton();
+  if (portalOpen()) {  // nastavovací Wi-Fi je otevřená: jen ji obsluhujeme
+    handleRuntimePortal();
+    delay(5);
+    return;
+  }
 
   if (!maintainWifi()) {
     delay(200);

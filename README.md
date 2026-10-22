@@ -38,6 +38,8 @@ Nový firmware jde do spínače nahrát i **přes Wi-Fi**, bez odpojování ([vi
 > IP adresa PC je nepovinná – když ji necháš prázdnou, spínač PC najde podle MAC (router nastavovat nemusíš).
 > **Aktualizace:** pomocník na PC (instaluje ho `windows-setup.ps1`, volba „aktualizace“) kontroluje nové verze firmwaru.
 > Když nějaká vyjde, bot napíše a tlačítkem **🔄 Aktualizace** (nebo `/update`) ji nahraješ přes Wi-Fi, bez kabelu. PC musí běžet.
+> Změna údajů za běhu: podrž tlačítko **BOOT** na 3 s (modrá LED se rozsvítí, otevře se Wi-Fi `WoL-Spinac`),
+> nebo připoj spínač USB kabelem a spusť `python scripts/wolctl.py` (potřebuje `pip install pyserial`).
 > Změna údajů později: podrž při zapnutí tlačítko **BOOT**, otevře se stejná nastavovací stránka.
 
 > ### ⚡ Rychlá cesta: nech se provést Claude Code
