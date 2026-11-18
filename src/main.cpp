@@ -366,12 +366,23 @@ bool discoverPcIp(IPAddress &found) {
 // se PC hledá podle MAC přes ARP; ARP funguje i když PC ping blokuje.
 bool isPcOnline() {
   bool fixedIp = cfg.pcIp.length() > 0;
-  if (pcIpKnown() && Ping.ping(pcIp, 1)) return true;
+  uint8_t mac[6];
+  IPAddress found;
+  // Po novém připojení k Wi-Fi mohlo ESP32 dostat starou IP PC – pak by pingalo samo sebe.
+  if (!fixedIp && pcIpKnown() && pcIp == WiFi.localIP()) {
+    pcIp = IPAddress();
+    lastDiscoverMs = 0;
+  }
+  if (pcIpKnown() && Ping.ping(pcIp, 1)) {
+    if (fixedIp) return true;
+    // Bez pevné IP ověř podle MAC, že odpovědělo opravdu PC (jeho IP mohl dostat někdo jiný).
+    if (pcMacBytes(mac) && arpFind(mac, found) && found == pcIp) return true;
+    pcIp = IPAddress();
+    lastDiscoverMs = 0;
+  }
   if (fixedIp) return false;
 
-  uint8_t mac[6];
   if (!pcMacBytes(mac)) return false;
-  IPAddress found;
   if (pcIpKnown()) {  // stejná IP jako minule, jen neodpovídá na ping?
     arpClear();
     arpRequest(pcIp);
@@ -1568,6 +1579,8 @@ void setup() {
   if (cfg.pcIp.length() > 0) pcIp.fromString(cfg.pcIp);
   allowedChats = parseChatIds(cfg.chatIds);
   bot.updateToken(cfg.botToken);
+  bot.waitForResponse = 5000;   // pomalejší Wi-Fi: odpověď nemusí dorazit do 1,5 s
+  bot.maxMessageLength = 4096;  // odpověď na zprávu s tlačítky bývá delší než 1500 znaků
   watchdogStart();
   setupOta();
 
