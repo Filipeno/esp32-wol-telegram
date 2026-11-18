@@ -1579,6 +1579,8 @@ void setup() {
   if (cfg.pcIp.length() > 0) pcIp.fromString(cfg.pcIp);
   allowedChats = parseChatIds(cfg.chatIds);
   bot.updateToken(cfg.botToken);
+  bot.waitForResponse = 5000;   // pomalejší Wi-Fi: odpověď nemusí dorazit do 1,5 s
+  bot.maxMessageLength = 4096;  // odpověď na zprávu s tlačítky bývá delší než 1500 znaků
   watchdogStart();
   setupOta();
 
